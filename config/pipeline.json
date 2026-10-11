@@ -1,0 +1,40 @@
+{
+  "meshy": {
+    "api_base_url": "https://api.meshy.ai",
+    "text_to_3d_endpoint": "/openapi/v2/text-to-3d",
+    "rigging_endpoint": "/openapi/v1/rigging",
+    "poll_interval_seconds": 5,
+    "poll_timeout_seconds": 900,
+    "pose_mode": "a-pose"
+  },
+  "blender": {
+    "timeout_seconds": 300,
+    "template_female_path": "templates/template_female_a_f_y_business_02.blend",
+    "template_male_path": "templates/template_male_a_m_y_business_02.blend",
+    "base_ped_female": "a_f_y_business_02",
+    "base_ped_male": "a_m_y_business_02",
+    "data_transfer": {
+      "vert_mapping": "POLYINTERP_VNORPROJ",
+      "layers_vgroup_select_src": "ALL",
+      "layers_vgroup_select_dst": "NAME",
+      "max_distance": 0.05
+    },
+    "max_vertex_influences": 4,
+    "max_vertices_per_geometry": 65535
+  },
+  "delivery": {
+    "targets": ["addonpeds_pedselector", "dlcpack"],
+    "usermods_manifest_name": "ap_m.xml",
+    "addonpeds_dlc_name": "pedselector",
+    "default_relationship_group_female": "CIVFEMALE",
+    "default_relationship_group_male": "CIVMALE",
+    "default_clipset_female": "move_f@generic",
+    "default_clipset_male": "move_m@generic",
+    "output_dir": "./dist"
+  },
+  "validation": {
+    "min_fbx_bytes": 20000,
+    "min_texture_bytes": 5000,
+    "require_power_of_two_textures": true
+  }
+}
