@@ -66,9 +66,14 @@ mcp_servers:
    `dist/<target_name>_delivery.zip` (AddonPeds/PedSelector + dlcpack autonome,
    avec README_INSTALL.txt dans chaque dossier).
 
-## Génération 3D : Meshy (cloud) ou local (futur poste GPU)
+## Génération 3D : Meshy, Tripo3D (cloud) ou local (futur poste GPU)
 
 - Par défaut `TEXT3D_BACKEND=meshy` (ou mock si `MESHY_API_KEY` absent).
+- `TEXT3D_BACKEND=tripo` bascule sur Tripo3D (`mcp_server/tripo_client.py`),
+  vérifié en direct contre l'API réelle le 2026-10-11 (authentification OK,
+  mais nécessite des crédits sur le compte — voir
+  `docs/architecture-decisions.md` point 9). Produit un GLB unique (textures
+  embarquées), pas encore importé par `blender_rig_export.py` (FBX seulement).
 - `TEXT3D_BACKEND=local` bascule sur `mcp_server/text3d_backend.LocalText3DBackend`,
   pensé pour un poste avec GPU CUDA ≥8 Go VRAM (TripoSR / Hunyuan3D-2). Sur ce
   sandbox (pas de GPU), ce backend tombe systématiquement en mock, comme Meshy.

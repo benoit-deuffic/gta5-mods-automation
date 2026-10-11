@@ -68,6 +68,26 @@ Suite à `docs/analyse-prerequis.md`. Décisions validées avec l'utilisateur le
    binaire natif, cf. §2.2 de `docs/analyse-prerequis.md`). Décision explicite
    de l'utilisateur : pas de portage Linux headless réel à faire dans ce dépôt.
 
+9. **Tripo3D comme second backend 3D (découverte du 2026-10-11)** : la clé
+   dans `~/.meshly` n'était pas une clé Meshy (préfixe `msy_`) mais une clé
+   **Tripo3D** (préfixe `tsk_`), confirmée valide en direct contre l'API réelle
+   (`GET /v3/account/balance` → HTTP 200, authentification OK) mais avec un
+   solde de 0 crédit (`balance=0.00`), donc aucune génération réelle possible
+   pour l'instant. `mcp_server/tripo_client.py` + `TripoBackend` dans
+   `text3d_backend.py` implémentent ce backend contre les vrais paramètres de
+   l'API (vérifiés en direct : `POST /v3/generation/text-to-model` nécessite
+   `model` parmi `P1-20260311|P2-20260801|v2.5-20250123|v3.0-20250812|
+   v3.1-20260211`, confirmé par un vrai 400 de l'API). Sélection via
+   `TEXT3D_BACKEND=tripo`. Différence notable avec Meshy : Tripo ne retourne
+   qu'un GLB unique (textures PBR embarquées, pas de fichiers texture séparés,
+   URL expirant 5 min après succès) — le script Blender (`blender_rig_export.py`)
+   n'importe pour l'instant que du FBX, l'import GLB natif (`bpy.ops.import_scene.gltf`)
+   reste à brancher quand Blender sera disponible pour le tester. Contrairement
+   au mode mock de Meshy (activé seulement si aucune clé n'est configurée),
+   une clé Tripo présente mais en échec (crédits insuffisants) lève une erreur
+   explicite (`TripoInsufficientCreditsError`) plutôt que de basculer en mock
+   silencieusement — pour ne jamais masquer un vrai problème de configuration.
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).

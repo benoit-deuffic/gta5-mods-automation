@@ -73,11 +73,21 @@ def generate_raw_3d_asset(prompt: str, target_name: str, art_style: str = "reali
     """
     staging_dir = _staging_dir(target_name)
     backend_name = os.environ.get("TEXT3D_BACKEND", "meshy").lower()
-    backend_kwargs = {
-        "base_url": _CONFIG.get("meshy", {}).get("api_base_url", "https://api.meshy.ai"),
-        "poll_interval_s": _CONFIG.get("meshy", {}).get("poll_interval_seconds", 5),
-        "poll_timeout_s": _CONFIG.get("meshy", {}).get("poll_timeout_seconds", 900),
-    } if backend_name == "meshy" else {}
+    if backend_name == "meshy":
+        backend_kwargs = {
+            "base_url": _CONFIG.get("meshy", {}).get("api_base_url", "https://api.meshy.ai"),
+            "poll_interval_s": _CONFIG.get("meshy", {}).get("poll_interval_seconds", 5),
+            "poll_timeout_s": _CONFIG.get("meshy", {}).get("poll_timeout_seconds", 900),
+        }
+    elif backend_name == "tripo":
+        backend_kwargs = {
+            "base_url": _CONFIG.get("tripo", {}).get("api_base_url", "https://openapi.tripo3d.ai/v3"),
+            "model_version": _CONFIG.get("tripo", {}).get("model_version", "v3.1-20260211"),
+            "poll_interval_s": _CONFIG.get("tripo", {}).get("poll_interval_seconds", 3),
+            "poll_timeout_s": _CONFIG.get("tripo", {}).get("poll_timeout_seconds", 300),
+        }
+    else:
+        backend_kwargs = {}
     backend = get_backend(backend_name, **backend_kwargs)
     asset = asyncio.run(backend.generate_humanoid(
         prompt=prompt, target_name=target_name, staging_dir=staging_dir,

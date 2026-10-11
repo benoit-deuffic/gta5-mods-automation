@@ -7,6 +7,13 @@
     "poll_timeout_seconds": 900,
     "pose_mode": "a-pose"
   },
+  "tripo": {
+    "api_base_url": "https://openapi.tripo3d.ai/v3",
+    "model_version": "v3.1-20260211",
+    "poll_interval_seconds": 3,
+    "poll_timeout_seconds": 300,
+    "note": "output is a single GLB with embedded textures, no separate texture files; auto-rig via /animations/rig (rig_type=biped) not yet wired into this pipeline"
+  },
   "blender": {
     "timeout_seconds": 300,
     "template_female_path": "templates/template_female_a_f_y_business_02.blend",

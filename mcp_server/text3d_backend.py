@@ -25,6 +25,7 @@ from typing import Protocol
 
 from mcp_server.meshy_client import GeneratedAsset, MeshyClient, MeshyError, is_mock_mode
 from mcp_server.meshy_client import FIXTURES_DIR as _MOCK_FIXTURES_DIR
+from mcp_server.tripo_client import TripoClient
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 LOCAL_3D_SCRIPT = SCRIPTS_DIR / "local_3d_generate.py"
@@ -99,10 +100,30 @@ class LocalText3DBackend:
         return GeneratedAsset(fbx_path=fbx_path, texture_paths=[tex_path], mock=True, task_id=f"local-mock ({reason})")
 
 
+class TripoBackend:
+    """Adapter so TripoClient satisfies the Text3DBackend protocol.
+
+    NOTE: unlike Meshy/local, Tripo3D only returns a GLB (mesh + embedded PBR
+    textures, no separate texture files) -- see mcp_server/tripo_client.py
+    module docstring. compile_gtav_ped's Blender step currently only imports
+    FBX; importing the GLB natively (bpy.ops.import_scene.gltf) is not yet
+    wired up since there is no Blender on this sandbox to test it against.
+    """
+
+    def __init__(self, **kwargs):
+        self._client = TripoClient(**kwargs)
+
+    async def generate_humanoid(self, prompt: str, target_name: str, staging_dir: Path,
+                                 pose_mode: str = "a-pose") -> GeneratedAsset:
+        return await self._client.generate_humanoid(prompt, target_name, staging_dir, pose_mode)
+
+
 def get_backend(name: str | None = None, **kwargs) -> Text3DBackend:
     name = (name or os.environ.get("TEXT3D_BACKEND", "meshy")).strip().lower()
     if name == "local":
         return LocalText3DBackend(**kwargs)
     if name == "meshy":
         return MeshyBackend(**kwargs)
-    raise ValueError(f"Unknown TEXT3D_BACKEND={name!r}, expected 'meshy' or 'local'.")
+    if name == "tripo":
+        return TripoBackend(**kwargs)
+    raise ValueError(f"Unknown TEXT3D_BACKEND={name!r}, expected 'meshy', 'tripo' or 'local'.")
