@@ -592,6 +592,67 @@ restent **intacts** — seul ce qui nourrit chaque appel à
       livraison finale (voie reskin texture, qui ne consomme pas cette
       sortie). 67 tests passent après ces corrections (était 64).
 
+16. **Découverte et correction d'un trou de rigging réel sur un ped multi-composants, intégrée au pipeline (2026-10-11)** —
+    en tentant un rendu Blender "corps entier nu" pour visualiser le résultat,
+    le mesh choisi par `find_reference_mesh()` s'est avéré être uniquement
+    tête+mains (103 os, 96,6% des poids sur des groupes de peau), sans
+    torse ni jambes visibles. Diagnostic : un vrai ped multi-composants GTA V
+    (`a_f_y_business_02`) stocke son corps comme un DICTIONNAIRE de plusieurs
+    maillages séparés par composant (head/uppr/lowr/hair/...), et Sollumz
+    importe automatiquement et rigue **seulement** le Drawable porté par le
+    `.yft` (ici la tête, pour la physique de mâchoire cassable) — les autres
+    composants (`hash_*.model`, matériaux `uppr_diff_000_a_whi` /
+    `lowr_diff_000_a_whi` / `hair_diff_*`) arrivent comme maillages
+    **statiques non rigués** (0 vertex group, parentés à un Empty, aucun
+    modificateur Armature) alors que leur géométrie est présente et
+    correctement positionnée en bind-pose. **Aucune ré-extraction côté jeu
+    n'était nécessaire** — tout était déjà dans les fichiers `.yft`/`.ydd`
+    extraits au point 12 ; c'était un trou du pipeline d'import/rigging, pas
+    un fichier manquant.
+    - Correctif appliqué avec `bpy.ops.object.parent_set(type='ARMATURE_AUTO')`
+      sur chaque maillage non rigué, vérifié par un rendu Cycles réel
+      avant/après (avant : buste+jambes invisibles ; après : corps complet,
+      correctement posé, habillé — chemise blanche, jupe noire, talons —
+      cohérent avec les vraies textures `a_f_y_business_02` une fois
+      rechargées depuis `/tmp/ped_xml_export/`).
+    - **Intégré au code pérenne**, pas juste au script de test ponctuel :
+      `scripts/blender_rig_export.py` gagne trois fonctions réutilisables —
+      `classify_body_component()` (déduit `(composant, variante)` depuis le
+      nom du matériau, convention `<comp>_diff_<variante>_...`),
+      `select_default_body_components()` (choisit la variante par défaut
+      — index le plus bas — par composant et liste les autres à masquer ;
+      un ped réel peut porter plusieurs variantes de torse/jambes/cheveux
+      superposées au même endroit), et `rig_unskinned_body_components()`
+      (rigue uniquement les maillages PAS déjà skinnés, ne touche jamais
+      un maillage déjà correctement pondéré). Câblé dans `main()` de
+      `blender_rig_export.py` (pipeline de remplacement géométrique complet)
+      ET dans `main()` de `ai_texture_reskin.py`.
+    - **`ai_texture_reskin.py` refondu en profondeur** pour reskinner TOUS
+      les composants du corps par défaut (plus un seul "reference_mesh"
+      choisi arbitrairement) : une seule bague de caméras partagée autour
+      de la bbox de l'ensemble du corps, puis partition de faces + bake
+      répétés composant par composant, chacun avec sa propre texture
+      source/cible (plus de "premier texture trouvée par hasard"). Sortie :
+      un fichier `<model>_<composant>_reskin.png` par composant (ex.
+      `testped01_uppr_reskin.png`, `..._lowr_reskin.png`) au lieu d'un seul
+      fichier global. `mcp_server/ai_reskin_runner.py` et le docstring de
+      l'outil MCP `generate_ai_texture_reskin` mis à jour en conséquence
+      (glob de détection des fichiers produits élargi).
+    - **Testé réellement** (`--skip-sd` pour la rapidité) contre le vrai
+      template : 4 composants détectés et traités (`head`, `uppr`, `lowr`,
+      `hair`), 100% des faces partitionnées pour chacun, 4 fichiers PNG
+      distincts produits (hashes différents, confirmé non dupliqués) — pas
+      encore re-testé avec un vrai passage SDXL+ControlNet complet sur les
+      4 composants (coût GPU ~4x plus long qu'avant, à faire avant la
+      prochaine livraison).
+    - 7 nouveaux tests (`tests/test_blender_rig_export_body_components.py`,
+      mock `bpy`), 74 tests passent au total (était 67).
+    - **Limite connue inchangée** : le rendu "reskin + corps entier" montre
+      toujours les coutures inter-caméras visibles sur un vêtement à motifs
+      complexes (veste à capuche/zip) — cette correction résout le
+      problème "corps incomplet", pas le problème de cohérence visuelle du
+      bake déjà documenté au point 14/15.
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).

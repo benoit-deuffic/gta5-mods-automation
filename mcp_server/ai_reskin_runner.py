@@ -82,7 +82,12 @@ def generate_reskin(template_path: Path, output_dir: Path, model_name: str, prom
     except subprocess.TimeoutExpired as exc:
         return ReskinResult(status="error", output_dir=output_dir, log=str(exc))
 
-    produced = sorted(output_dir.glob(f"{model_name}_reskin*"))
+    # Pattern must tolerate the per-component naming scheme
+    # ("<model>_<component>_reskin.png", e.g. "testped01_uppr_reskin.png")
+    # introduced when ai_texture_reskin.py started reskinning every body
+    # component (uppr/lowr/hair/...) instead of a single mesh -- the old
+    # "<model>_reskin*" prefix-only glob stopped matching those.
+    produced = sorted(output_dir.glob(f"{model_name}_*reskin*"))
     if proc.returncode != 0:
         return ReskinResult(status="error", output_dir=output_dir, produced_files=produced,
                              log=proc.stdout[-4000:] + proc.stderr[-4000:])

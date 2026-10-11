@@ -60,7 +60,10 @@ import mathutils
 from bpy_extras.object_utils import world_to_camera_view
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from blender_rig_export import find_reference_armature, find_reference_mesh  # noqa: E402
+from blender_rig_export import (  # noqa: E402
+    find_reference_armature, find_reference_mesh,
+    rig_unskinned_body_components, select_default_body_components,
+)
 
 DEFAULT_SD_PYTHON = os.path.expanduser("~/tools/sd-local/venv/bin/python")
 DEFAULT_SD_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sd_view_synthesis.py")
@@ -477,47 +480,65 @@ def main():
     enable_sollumz()
 
     reference_armature = find_reference_armature(bpy.data.objects)
-    reference_mesh = find_reference_mesh(bpy.data.objects, reference_armature)
-    if not reference_mesh:
-        raise RuntimeError("Template file lacks a detectable reference mesh.")
+    if not reference_armature:
+        raise RuntimeError("Template file lacks a detectable reference armature.")
 
-    diffuse_uv_name = find_diffuse_uv_layer(reference_mesh.data)
-    if not diffuse_uv_name:
-        raise RuntimeError("Reference mesh has no existing UV layer to bake into.")
+    # Real Sollumz imports of a multi-component ped only pre-skin the ONE
+    # Drawable embedded in the .yft Fragment (usually the head) -- uppr/
+    # lowr/hair land as separate, unskinned meshes even though their
+    # geometry is correct (see rig_unskinned_body_components() docstring,
+    # found 2026-10-11 by actually rendering a_f_y_business_02's full body:
+    # before this fix, a texture reskin could only ever touch whichever
+    # single piece Sollumz happened to auto-skin -- never the actual
+    # clothing). Rig them, then pick exactly one "default" mesh per
+    # component (a real ped's .ydd typically bundles several alternate
+    # variants of the same component as separate Drawables, e.g.
+    # a_f_y_business_02 has 2 uppr + 2 lowr + 3 hair variants all at the
+    # same position -- baking onto all of them would duplicate/overlap
+    # geometry and waste GPU time) and hide the rest from the scene
+    # entirely so they can't interfere with bbox framing or bake output.
+    rig_unskinned_body_components(reference_armature, list(bpy.data.objects))
+    default_components, other_variants = select_default_body_components(bpy.data.objects)
+    for obj in other_variants:
+        obj.hide_render = True
+        obj.hide_set(True)
+
+    # Still include the legacy single find_reference_mesh() result as a
+    # fallback component (keyed "body") for templates that aren't a
+    # multi-component ped dictionary (e.g. a from-scratch single-mesh
+    # template, or a test fixture) -- this keeps the previous, narrower
+    # behaviour working unchanged when there's nothing to classify by the
+    # component-texture-naming convention.
+    if not default_components:
+        fallback = find_reference_mesh(bpy.data.objects, reference_armature)
+        if not fallback:
+            raise RuntimeError("Template file lacks a detectable reference mesh.")
+        default_components = {"body": fallback}
+
+    print(f"[INFO] Body components to reskin: {sorted(default_components.keys())} "
+          f"({len(other_variants)} alternate-variant mesh(es) hidden)")
 
     scene = bpy.context.scene
-    center, radius = mesh_world_bbox(reference_mesh)
-    cameras = build_cameras(scene, center, radius, args.num_cameras, args.render_size)
-    print(f"[INFO] Built {len(cameras)} camera(s) around bbox center={tuple(center)} radius={radius:.3f}")
 
-    assignment = partition_faces_to_cameras(reference_mesh, cameras)
-    per_cam_faces = {}
-    for face_idx, cam_name in assignment.items():
-        per_cam_faces.setdefault(cam_name, []).append(face_idx)
-    total_faces = len(reference_mesh.data.polygons)
-    print(f"[INFO] Partitioned {len(assignment)}/{total_faces} faces across {len(per_cam_faces)} camera(s):")
-    for cam_name, faces in per_cam_faces.items():
-        print(f"       {cam_name}: {len(faces)} faces")
+    # One shared camera ring around the WHOLE body (union of every
+    # component's bbox), not per-component -- a per-component ring would
+    # put the camera distance/framing out of proportion for small pieces
+    # (hands) vs large ones (torso+legs), and a shared ring is what lets a
+    # camera's region classification (skin vs clothing, see
+    # classify_camera_regions()) stay meaningful across components.
+    all_corners = []
+    for obj in default_components.values():
+        all_corners += [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
+    xs = [c[0] for c in all_corners]
+    ys = [c[1] for c in all_corners]
+    zs = [c[2] for c in all_corners]
+    center = mathutils.Vector(((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, (min(zs) + max(zs)) / 2))
+    radius = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)) / 2
+    cameras = build_cameras(scene, center, radius, args.num_cameras, args.render_size)
+    print(f"[INFO] Built {len(cameras)} camera(s) around whole-body bbox "
+          f"center={tuple(center)} radius={radius:.3f}")
 
     skin_prompt = args.skin_prompt or DEFAULT_SKIN_PROMPT
-    camera_regions = classify_camera_regions(reference_mesh, per_cam_faces)
-    print(f"[INFO] Camera region classification (skin vs clothing): {camera_regions}")
-
-    target_image = bpy.data.images.new(
-        name=f"{args.model_name}_reskin", width=args.texture_size, height=args.texture_size, alpha=False)
-    # Seed with the existing texture's content where available so unassigned
-    # faces (no camera saw them front-on) keep their original appearance
-    # rather than going black.
-    existing_image = None
-    for img in bpy.data.images:
-        if img.name != target_image.name and img.size[0] > 0:
-            existing_image = img
-            break
-    if existing_image is not None:
-        try:
-            target_image.pixels.foreach_set(list(existing_image.pixels))
-        except Exception:
-            pass
 
     manifest = {
         "model_name": args.model_name,
@@ -525,66 +546,110 @@ def main():
         "skin_prompt": skin_prompt,
         "num_cameras": len(cameras),
         "texture_size": args.texture_size,
-        "cameras": {},
+        "components": {},
     }
 
-    for cam in cameras:
-        faces = per_cam_faces.get(cam.name, [])
-        if not faces:
+    for component_name, mesh_obj in default_components.items():
+        diffuse_uv_name = find_diffuse_uv_layer(mesh_obj.data)
+        if not diffuse_uv_name:
+            print(f"[WARN] Component '{component_name}' ({mesh_obj.name}) has no UV layer, skipping.")
             continue
-        guide_path = os.path.join(args.output_dir, f"{args.model_name}_{cam.name}_guide.png")
-        distance = (cam.location - center).length
-        near_clip = max(0.01, distance - radius * 1.5)
-        far_clip = distance + radius * 1.5
-        render_guide_image(scene, cam, guide_path, args.render_size, near=near_clip, far=far_clip)
 
-        region = camera_regions.get(cam.name, "clothing")
-        cam_prompt = skin_prompt if region == "skin" else args.prompt
-        # Mosaic-mitigation (docs/architecture-decisions.md point 15): far-depth/
-        # background pixels are correctly flat black already (render_guide_image's
-        # Map Range use_clamp), but ControlNet-depth still hallucinates a repeated
-        # tiled pattern of the prompt's material over that flat region since
-        # nothing in the prompt says what to do with it. Appending an explicit,
-        # content-neutral background instruction (not a change to which region's
-        # prompt is picked) measurably reduces this without touching the depth
-        # map itself.
-        cam_prompt = f"{cam_prompt}, plain neutral background, solid color background"
+        assignment = partition_faces_to_cameras(mesh_obj, cameras)
+        per_cam_faces = {}
+        for face_idx, cam_name in assignment.items():
+            per_cam_faces.setdefault(cam_name, []).append(face_idx)
+        total_faces = len(mesh_obj.data.polygons)
+        print(f"[INFO] Component '{component_name}': partitioned {len(assignment)}/{total_faces} "
+              f"faces across {len(per_cam_faces)} camera(s).")
 
-        if args.skip_sd:
-            view_path = guide_path
-        else:
-            view_path = os.path.join(args.output_dir, f"{args.model_name}_{cam.name}_view.png")
-            cmd = [
-                args.sd_python, args.sd_script,
-                "--depth-image", guide_path,
-                "--prompt", cam_prompt,
-                "--output", view_path,
-                "--controlnet-conditioning-scale", str(args.controlnet_conditioning_scale),
-                "--steps", str(args.steps),
-            ]
-            print(f"[INFO] Running SD view synthesis for {cam.name} (region={region}): {' '.join(cmd)}")
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if proc.returncode != 0:
-                print(f"[WARN] SD synthesis failed for {cam.name}, falling back to guide image.\n{proc.stderr[-2000:]}")
+        camera_regions = classify_camera_regions(mesh_obj, per_cam_faces)
+
+        target_image = bpy.data.images.new(
+            name=f"{args.model_name}_{component_name}_reskin",
+            width=args.texture_size, height=args.texture_size, alpha=False)
+        # Seed with this component's OWN existing diffuse texture (not just
+        # "the first image found", which only worked by accident when there
+        # was a single component -- now that several components each have
+        # their own diffuse texture, each must seed from its own, found via
+        # this component's real material graph rather than guessed).
+        existing_image = None
+        for slot in mesh_obj.material_slots:
+            if slot.material is None or not slot.material.use_nodes:
+                continue
+            for node in slot.material.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image is not None and node.image.size[0] > 0:
+                    existing_image = node.image
+                    break
+            if existing_image:
+                break
+        if existing_image is not None:
+            try:
+                target_image.pixels.foreach_set(list(existing_image.pixels))
+            except Exception:
+                pass
+
+        component_manifest = {"mesh_object": mesh_obj.name, "cameras": {}}
+
+        for cam in cameras:
+            faces = per_cam_faces.get(cam.name, [])
+            if not faces:
+                continue
+            guide_path = os.path.join(
+                args.output_dir, f"{args.model_name}_{component_name}_{cam.name}_guide.png")
+            distance = (cam.location - center).length
+            near_clip = max(0.01, distance - radius * 1.5)
+            far_clip = distance + radius * 1.5
+            render_guide_image(scene, cam, guide_path, args.render_size, near=near_clip, far=far_clip)
+
+            region = camera_regions.get(cam.name, "clothing")
+            cam_prompt = skin_prompt if region == "skin" else args.prompt
+            # Mosaic-mitigation (docs/architecture-decisions.md point 15):
+            # see the identical comment in the previous single-mesh version
+            # of this loop -- unchanged behaviour, just now per-component.
+            cam_prompt = f"{cam_prompt}, plain neutral background, solid color background"
+
+            if args.skip_sd:
                 view_path = guide_path
+            else:
+                view_path = os.path.join(
+                    args.output_dir, f"{args.model_name}_{component_name}_{cam.name}_view.png")
+                cmd = [
+                    args.sd_python, args.sd_script,
+                    "--depth-image", guide_path,
+                    "--prompt", cam_prompt,
+                    "--output", view_path,
+                    "--controlnet-conditioning-scale", str(args.controlnet_conditioning_scale),
+                    "--steps", str(args.steps),
+                ]
+                print(f"[INFO] [{component_name}] Running SD view synthesis for {cam.name} "
+                      f"(region={region}): {' '.join(cmd)}")
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if proc.returncode != 0:
+                    print(f"[WARN] SD synthesis failed for {component_name}/{cam.name}, "
+                          f"falling back to guide image.\n{proc.stderr[-2000:]}")
+                    view_path = guide_path
 
-        baked = bake_camera_partition(
-            bpy.context, reference_mesh, faces, cam, view_path, target_image, diffuse_uv_name, args.texture_size)
-        manifest["cameras"][cam.name] = {
-            "num_faces": len(faces),
-            "region": region,
-            "prompt_used": cam_prompt,
-            "guide_image": guide_path,
-            "view_image": view_path,
-            "baked": baked,
-        }
+            baked = bake_camera_partition(
+                bpy.context, mesh_obj, faces, cam, view_path, target_image, diffuse_uv_name, args.texture_size)
+            component_manifest["cameras"][cam.name] = {
+                "num_faces": len(faces),
+                "region": region,
+                "prompt_used": cam_prompt,
+                "guide_image": guide_path,
+                "view_image": view_path,
+                "baked": baked,
+            }
 
-    final_png = os.path.join(args.output_dir, f"{args.model_name}_reskin.png")
-    target_image.filepath_raw = final_png
-    target_image.file_format = 'PNG'
-    target_image.save()
-    manifest["output_png"] = final_png
-    print(f"[OK] Saved accumulated reskin texture to {final_png}")
+        component_png = os.path.join(args.output_dir, f"{args.model_name}_{component_name}_reskin.png")
+        target_image.filepath_raw = component_png
+        target_image.file_format = 'PNG'
+        target_image.save()
+        component_manifest["output_png"] = component_png
+        component_manifest["source_texture"] = existing_image.name if existing_image else None
+        manifest["components"][component_name] = component_manifest
+        print(f"[OK] Saved '{component_name}' reskin texture to {component_png} "
+              f"(source texture: {component_manifest['source_texture']})")
 
     manifest_path = os.path.join(args.output_dir, f"{args.model_name}_reskin_manifest.json")
     with open(manifest_path, "w") as f:

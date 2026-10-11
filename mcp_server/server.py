@@ -215,10 +215,19 @@ def generate_ai_texture_reskin(target_name: str, prompt: str, skin_prompt: str |
     clothing material anymore (docs/architecture-decisions.md point 15).
 
     This is a reskin/visual-preview step, NOT a replacement for
-    compile_gtav_ped -- it does not produce a new rigged mesh, only a
-    candidate texture (<target_name>_reskin.png in the output dir). Round
-    trip to a real binary .ytd is a separate manual step via
-    scripts/dds_pack_and_validate.py once a texture is approved (not run
+    compile_gtav_ped -- it does not produce a new rigged mesh. It reskins
+    EVERY body component found on the ped template (uppr/lowr/hair/etc, not
+    just one), each as its own output file
+    "<target_name>_<component>_reskin.png" in the output dir (e.g.
+    "testped01_uppr_reskin.png", "testped01_lowr_reskin.png") -- real
+    Sollumz imports of a multi-component ped only pre-skin ONE Drawable
+    (usually the head), so the pipeline first auto-rigs every other
+    component onto the same armature before texturing them (see
+    scripts/blender_rig_export.rig_unskinned_body_components(), added
+    2026-10-11 after discovering the rest of the body geometry was already
+    present but unskinned -- no extra extraction from the game was needed).
+    Round trip to a real binary .ytd is a separate manual step via
+    scripts/dds_pack_and_validate.py per produced component (not run
     automatically here -- see docs/architecture-decisions.md for why, incl.
     a known codewalker-cli `inspect` round-trip bug reproduced even on an
     unmodified base asset).

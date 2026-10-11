@@ -26,6 +26,7 @@ Corrections applied vs. the original spec script (docs/analyse-prerequis.md §2.
 import sys
 import argparse
 import os
+import re
 import bpy
 
 IMPORTABLE_EXTENSIONS = {".fbx", ".glb", ".gltf"}
@@ -89,6 +90,20 @@ def find_reference_mesh(candidates, reference_armature=None):
     groups actually correspond to the reference armature's bones (i.e. it's
     skinned), picking the one with the most vertices (the main body LOD,
     not a prop/accessory).
+
+    IMPORTANT CAVEAT (found 2026-10-11 doing a real full-body render): on a
+    real multi-component ped like a_f_y_business_02, the body is a
+    DICTIONARY of several separate per-component meshes (head, uppr, lowr,
+    hair, hands...), not one single mesh -- and only ONE of them (whichever
+    component the .yft Fragment itself carries, typically the head, for
+    jaw/face breakable physics) comes in pre-skinned from Sollumz's import;
+    the rest (uppr/lowr/hair) land as static, UNSKINNED meshes (0 vertex
+    groups, parented to a plain Empty, no Armature modifier) even though
+    their geometry is present and correctly positioned. This function only
+    ever sees candidates that are ALREADY skinned -- call
+    `rig_unskinned_body_components()` first if you need the other
+    components considered too (e.g. for a full-body operation, not just
+    "the one pre-skinned piece").
     """
     bone_names = set(b.name for b in reference_armature.data.bones) if reference_armature else None
     best = None
@@ -109,6 +124,114 @@ def find_reference_mesh(candidates, reference_armature=None):
             best = obj
             best_verts = nverts
     return best
+
+
+# Matches GTA V ped component-texture naming convention, e.g.
+# "uppr_diff_000_a_whi" -> component="uppr", variant=0. Covers the
+# component codes actually observed on a real extracted ped
+# (a_f_y_business_02): head, uppr, lowr, hand, feet, hair, accs, teef.
+_COMPONENT_TEXTURE_RE = re.compile(
+    r"^(head|uppr|lowr|hand|feet|hair|accs|teef)_diff_(\d+)", re.IGNORECASE)
+
+
+def classify_body_component(obj):
+    """Infers (component, variant_index) from a mesh object's material
+    name(s), using the GTA V ped texture naming convention
+    "<component>_diff_<variant>_..." (e.g. "uppr_diff_000_a_whi").
+    Returns None if no material matches -- e.g. for the armature itself,
+    accessories, or objects that aren't a recognized ped body component.
+    Verified against the real a_f_y_business_02 asset: its component
+    meshes' material names follow this convention exactly.
+    """
+    for slot in obj.material_slots:
+        if slot.material is None:
+            continue
+        m = _COMPONENT_TEXTURE_RE.match(slot.material.name)
+        if m:
+            return m.group(1).lower(), int(m.group(2))
+    return None
+
+
+def select_default_body_components(objects):
+    """Groups ped body-component meshes by component type (head/uppr/lowr/
+    hand/feet/hair/accs/teef) and picks the lowest-variant-index mesh per
+    component as the "default" look -- a real ped's .ydd typically bundles
+    several alternate variants of the same component (different clothing
+    colors/hair styles) as separate Drawables, all landing as separate
+    Blender objects at the same location; picking all of them would
+    duplicate/overlap geometry (verified for real: a_f_y_business_02 has 2
+    uppr variants, 2 lowr variants, 3 hair variants).
+
+    Returns (selected: dict[str, bpy.types.Object], others: list[bpy.types.Object])
+    -- `others` are the non-default variants, which the caller will
+    typically want to hide (hide_render=True) so they don't appear in a
+    render or get included in a bake/export pass.
+    """
+    by_component = {}
+    for obj in objects:
+        if obj.type != 'MESH':
+            continue
+        classified = classify_body_component(obj)
+        if classified is None:
+            continue
+        component, variant = classified
+        by_component.setdefault(component, []).append((variant, obj))
+
+    selected = {}
+    others = []
+    for component, items in by_component.items():
+        items.sort(key=lambda pair: pair[0])
+        selected[component] = items[0][1]
+        others.extend(obj for _variant, obj in items[1:])
+    return selected, others
+
+
+def rig_unskinned_body_components(armature, mesh_objects):
+    """Binds any currently-unskinned mesh in `mesh_objects` to `armature`
+    via Blender's automatic (heat-map) weight generation.
+
+    WHY THIS EXISTS: real Sollumz imports of a multi-component ped only
+    pre-skin the single Drawable embedded in the .yft Fragment (usually the
+    head) -- other components (uppr/lowr/hair) land as static unskinned
+    meshes even though the geometry itself is correct and in the right
+    bind-pose position (verified for real on bora, 2026-10-11, by rendering
+    a_f_y_business_02 before/after this fix: before, torso+legs were
+    invisible/not part of any skinned hierarchy; after, a complete,
+    correctly-posed, fully clothed body rendered with
+    `bpy.ops.object.parent_set(type='ARMATURE_AUTO')`). This is NOT a
+    missing-asset problem -- no extra extraction from the game is needed,
+    the geometry is already there; it's purely a Sollumz-import/rigging gap
+    this function closes.
+
+    Objects already skinned (has at least one vertex group matching a bone
+    name) are left untouched and NOT re-parented (re-running
+    parent_set(ARMATURE_AUTO) on an already-skinned mesh would discard its
+    real per-vertex weights and replace them with an approximate heat-map
+    guess -- strictly worse). Returns the list of objects that were
+    actually (re-)rigged by this call.
+    """
+    bone_names = set(b.name for b in armature.data.bones)
+    to_rig = []
+    for obj in mesh_objects:
+        if obj.type != 'MESH':
+            continue
+        vgroup_names = set(g.name for g in obj.vertex_groups)
+        if vgroup_names & bone_names:
+            continue  # already skinned to this armature, leave it alone
+        if len(obj.data.vertices) == 0:
+            continue
+        to_rig.append(obj)
+
+    if not to_rig:
+        return []
+
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in to_rig:
+        obj.select_set(True)
+    armature.select_set(True)
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.parent_set(type='ARMATURE_AUTO')
+    return to_rig
 
 
 def scale_to_reference_bbox(target_mesh, reference_mesh):
@@ -158,6 +281,13 @@ def main():
             continue
 
     reference_armature = find_reference_armature(bpy.data.objects)
+    # Rig any unskinned body-component meshes (uppr/lowr/hair -- real
+    # Sollumz imports only pre-skin the .yft's own Drawable, see
+    # rig_unskinned_body_components() docstring) BEFORE picking the
+    # reference mesh, so find_reference_mesh() can see the whole rigged
+    # body, not just the one piece Sollumz happened to skin automatically.
+    if reference_armature:
+        rig_unskinned_body_components(reference_armature, list(bpy.data.objects))
     reference_mesh = find_reference_mesh(bpy.data.objects, reference_armature)
     if not reference_armature or not reference_mesh:
         raise RuntimeError("Template file lacks expected Armature or Base Mesh objects.")
