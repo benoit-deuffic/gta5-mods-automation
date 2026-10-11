@@ -19,7 +19,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_server import blender_runner, meshy_client, prompt_refiner, validator
+from mcp_server import ai_reskin_runner, blender_runner, meshy_client, prompt_refiner, validator
 from mcp_server.text3d_backend import get_backend
 from scripts import package_builder, xml_manifest_updater, ymt_builder
 
@@ -168,6 +168,69 @@ def compile_gtav_ped(target_name: str, fbx_path: str, gender: str = "female") ->
             "ok": artifact_report.ok,
             "errors": artifact_report.errors,
             "warnings": artifact_report.warnings,
+        },
+    }
+
+
+@mcp.tool()
+def generate_ai_texture_reskin(target_name: str, prompt: str, num_cameras: int = 6,
+                                texture_size: int = 512, strength: float = 0.85,
+                                steps: int = 25, gender: str = "female") -> dict:
+    """Headless, multi-camera, UV-aware AI texture reskin for a GTA V ped
+    (scripts/ai_texture_reskin.py): renders N camera views of the ped
+    template mesh, synthesizes a new look per view with a local SDXL
+    img2img pass (scripts/sd_view_synthesis.py, run in the sd-local venv),
+    and bakes the results back onto the mesh's real diffuse UV layout.
+
+    This is a reskin/visual-preview step, NOT a replacement for
+    compile_gtav_ped -- it does not produce a new rigged mesh, only a
+    candidate texture (<target_name>_reskin.png in the output dir). Round
+    trip to a real binary .ytd is a separate manual step via
+    scripts/dds_pack_and_validate.py once a texture is approved (not run
+    automatically here -- see docs/architecture-decisions.md for why, incl.
+    a known codewalker-cli `inspect` round-trip bug reproduced even on an
+    unmodified base asset).
+
+    Falls back to a clearly-marked mock when Blender or the sd-local venv
+    aren't installed on this machine (see mcp_server/ai_reskin_runner.py).
+
+    Applies the same NSFW/content guardrail as refine_prompt_with_ollama
+    (prompt_refiner's blocked-keyword list) before running anything, since
+    this tool also accepts a raw user prompt feeding an external generator.
+    """
+    target_name = _normalize_target_name(target_name)
+    prompt_refiner._check_blocked(prompt)
+
+    blender_cfg = _CONFIG.get("blender", {})
+    template_key = "template_female_path" if gender == "female" else "template_male_path"
+    template_path = Path(blender_cfg.get(template_key, f"templates/template_{gender}.blend"))
+    output_dir = WORKSPACE_DIR / target_name / "reskin"
+
+    result = ai_reskin_runner.generate_reskin(
+        template_path=template_path,
+        output_dir=output_dir,
+        model_name=target_name,
+        prompt=prompt,
+        num_cameras=num_cameras,
+        texture_size=texture_size,
+        strength=strength,
+        steps=steps,
+        timeout_s=blender_cfg.get("timeout_seconds", 900),
+    )
+
+    return {
+        "target_name": target_name,
+        "status": result.status,
+        "mock": result.mock,
+        "output_dir": str(result.output_dir),
+        "produced_files": [str(p) for p in result.produced_files],
+        "log_tail": result.log[-2000:],
+        "validation": {
+            "ok": result.status in ("generated", "mock"),
+            "errors": [] if result.status in ("generated", "mock") else [result.log[-500:]],
+            "warnings": [] if result.status == "generated" else [
+                "mock mode: no real texture produced" if result.mock else "pipeline reported an error"
+            ],
         },
     }
 

@@ -233,6 +233,99 @@ Suite à `docs/analyse-prerequis.md`. Décisions validées avec l'utilisateur le
       manifest).
     - 55 tests toujours verts après ces corrections.
 
+13. **Pipeline de reskin textures IA headless multi-caméra, bake UV-aware
+    (bora, 2026-10-11)** : construction de `scripts/ai_texture_reskin.py`
+    (Blender `--background`) + `scripts/sd_view_synthesis.py` (process
+    séparé, venv `~/tools/sd-local/venv`) + `scripts/dds_pack_and_validate.py`
+    + outil MCP `generate_ai_texture_reskin`, sans AUCUNE dépendance à un
+    viewport interactif (contrainte dure — cf. tentative Dream Textures
+    abandonnée, point précédent de ce doc et skill `gtav-ped-modding`).
+    - **Rendu GPU headless testé en premier, RÉSULTAT POSITIF** : contrairement
+      à l'inquiétude de départ sur le passthrough GPU WSL2 pour le rendu,
+      EEVEE Next ET Cycles (device CUDA, RTX 5070 détectée par
+      `prefs.get_devices()`) fonctionnent tous les deux `blender --background`
+      sans aucun hack — testé avec une scène cube+caméra+soleil triviale,
+      confirmé ensuite sur le vrai mesh ped (3041 faces, rendu 512×512 en
+      ~1.5s/vue à 16 samples Cycles). Pas de dépendance X11/OpenGL display
+      requise pour Cycles CUDA en mode background.
+    - **6 caméras, pas 4** : une couronne de 4 caméras (face/dos/gauche/droite)
+      seule laisse les épaules et l'entrejambe quasi non couverts sur un
+      ped humanoïde — ajout de 2 caméras haut/bas. Vérifié concrètement sur
+      le mesh réel : partition de 3041/3041 faces en 6 lots de tailles très
+      inégales (1066 pour la caméra avant, 232 pour celle du dessus),
+      confirmant que la couverture par caméra est loin d'être uniforme et
+      que le nombre de caméras compte réellement.
+    - **Masquage par partition exclusive des faces, pas par compositing de
+      pixels transparents** : chaque face est assignée à EXACTEMENT une
+      caméra (dot(normale, direction-caméra) maximal, seuil >0.05), implémenté
+      en dupliquant le mesh et en supprimant les faces non retenues avant le
+      bake Cycles (`type='EMIT'`) — comme seule la géométrie retenue existe
+      dans l'objet dupliqué, le bake ne peut physiquement écrire que dans les
+      texels de ses propres îlots UV, donnant le "masquage" gratuitement sans
+      logique de compositing de pixels séparée. **Limitation assumée et non
+      implémentée** : pas de test d'occlusion réel (ray-cast) — une face peut
+      être assignée à une caméra géométriquement face à elle même si une autre
+      partie du mesh bloque physiquement la vue dans le rendu ; seul le test
+      frontal (dot product) est fait.
+    - **Image de guidage = rendu texturé Cycles réel du mesh, pas une vraie
+      carte de profondeur Z** : une normalisation Z-pass + compositeur a été
+      jugée inutilement complexe à câbler proprement en headless pour la
+      valeur ajoutée obtenue ; la tâche autorisait explicitement un "guide
+      image plat/clay-shaded" comme entrée du fallback SDXL img2img — c'est
+      ce qui est implémenté, documenté comme simplification (pas de ControlNet
+      profondeur).
+    - **SDXL img2img, pas StableDiffusionDepth2ImgPipeline** : le modèle
+      depth officiel (`stabilityai/stable-diffusion-2-depth`) nécessiterait un
+      téléchargement supplémentaire de ~5 Go non fait cette session ; SDXL
+      base (déjà en local, prouvé fonctionnel précédemment) est réutilisé en
+      img2img. **Résultat honnête testé réellement** : à `strength` 0.6-0.75
+      sur une image de guidage, le résultat est quasi identique à l'entrée
+      (quasiment aucun contenu généré visible) — seulement à `strength`
+      0.85-0.9 un contenu génératif réel apparaît. Même à 0.85, la qualité
+      vis-à-vis du prompt testé ("a stylized adult female character wearing a
+      dark leather jacket") est décevante sur le mesh réel : le rendu généré
+      ressemble à un motif mécanique/armure stylisée plutôt qu'à une veste en
+      cuir reconnaissable (image inspectée directement, voir
+      `/tmp/reskin_test2/testped_reskin_cam_ring_0_view.png` au moment du test).
+      Le mécanisme (caméras, partition, projection UV, bake) est validé comme
+      fonctionnel ; la qualité du contenu généré par SDXL img2img sur ce type
+      d'image de guidage (rendu texturé existant, pas un simple silhouette
+      plate) ne l'est pas — probablement un meilleur candidat serait un
+      ControlNet-depth dédié ou un guide image plus proche d'un silhouette/
+      normal map plutôt qu'un rendu texturé complet. Non corrigé dans ce lot,
+      documenté comme limitation connue.
+    - **Bake Cycles EMIT confirmé fonctionnel pour de vrai** : testé d'abord
+      avec `--skip-sd` (bake direct des images de guidage, sans coût GPU SD)
+      pour valider rapidement la mécanique géométrique — texture finale
+      inspectée visuellement, contenu distinct par région (visage, bras,
+      torse) confirmé, pas une image uniforme/cassée.
+    - **Conversion DDS vers le format pixel d'origine** : lu depuis le
+      `<Format>` du `.ytd.xml` existant (`D3DFMT_DXT1` pour
+      `uppr_diff_000_a_whi`, 512×512) via `scripts/dds_pack_and_validate.py`,
+      écriture Pillow avec `pixel_format='DXT1'`, fichier DDS remplacé en
+      place (même nom) pour que le `.ytd.xml` existant reste valide sans
+      régénération.
+    - **Bug pré-existant découvert dans `codewalker-cli inspect` sur ce
+      `.ytd`, PAS introduit par ce travail** : `codewalker-cli convert` produit
+      un `.ytd` binaire de taille raisonnable sans erreur, mais
+      `codewalker-cli inspect` échoue avec `Exception: illegal position!` —
+      reproduit à l'identique sur un round-trip de l'export **original non
+      modifié** (`/tmp/ped_xml_export` tel quel, aucune texture remplacée),
+      donc ce n'est pas notre nouvelle texture qui casse quoi que ce soit,
+      c'est un bug (ou une limite) de la sous-commande `inspect` elle-même
+      face à ce `.ytd` multi-textures particulier. Validation alternative
+      utilisée : relecture Pillow du DDS produit (dimensions/format corrects
+      confirmés), le binaire produit par `convert` lui-même n'a pas pu être
+      validé en jeu (pas de PC Windows GTA V dans cette session).
+    - Nouveaux tests : `tests/test_ai_reskin_runner.py` (fallback mock,
+      résolution Blender/sd-local) et `tests/test_dds_pack_and_validate.py`
+      (parsing du format depuis le XML, rejet d'un format DDS non mappé) —
+      62 tests passent (55 existants + 7 nouveaux).
+    - Outil MCP `generate_ai_texture_reskin` ajouté, même convention que les
+      autres (`_normalize_target_name` en premier, fallback mock si
+      Blender/sd-local absents, réutilise le garde-fou mots-clés bloqués de
+      `prompt_refiner` puisqu'il accepte aussi un prompt brut utilisateur).
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).
