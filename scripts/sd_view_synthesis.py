@@ -50,7 +50,11 @@ def parse_args():
     p.add_argument("--init-image", dest="depth_image",
                    help="Deprecated alias for --depth-image, kept for backward compatibility.")
     p.add_argument("--prompt", required=True)
-    p.add_argument("--negative-prompt", default="blurry, low quality, distorted, extra limbs, text, watermark")
+    p.add_argument("--negative-prompt", default=(
+        "blurry, low quality, distorted, extra limbs, text, watermark, "
+        "patterned background, busy background, repeating pattern, tiled texture, "
+        "mosaic background, checkerboard background"
+    ))
     p.add_argument("--output", required=True, help="Path to write the generated PNG")
     p.add_argument("--steps", type=int, default=30)
     p.add_argument("--guidance-scale", type=float, default=7.0)

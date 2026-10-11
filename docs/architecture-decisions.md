@@ -412,6 +412,97 @@ Suite à `docs/analyse-prerequis.md`. Décisions validées avec l'utilisateur le
       sur les vues générées ; pas de validation en jeu (pas de PC Windows
       GTA V dans cette session).
 
+## 15. Prompt différencié par zone du corps (peau vs vêtement) + mitigation de l'artefact de mosaïque en arrière-plan (suite du point 14)
+
+Reprend les deux limites explicitement documentées au point 14 ci-dessus. Les deux
+mécanismes existants (placement caméras, `partition_faces_to_cameras()`, bake UV)
+restent **intacts** — seul ce qui nourrit chaque appel à
+`scripts/sd_view_synthesis.py` par caméra a changé.
+
+- **Prompt par zone du corps** (`scripts/ai_texture_reskin.py` : `SKIN_VGROUP_PREFIXES`,
+  `_face_skin_score()`, `classify_camera_regions()`, appelée dans `main()` juste après
+  le partitionnement) : pour chaque caméra, calcule un score peau/vêtement par face
+  (moyenne, sur les sommets de la face, du ratio poids-sur-groupes-peau / poids-total-
+  sur-tous-groupes de ce sommet) puis une moyenne pondérée par aire sur toutes les
+  faces assignées à cette caméra. Caméra classée `skin` si fraction >= 0.35, sinon
+  `clothing`. Les groupes de vertex "peau" sont identifiés par préfixe de nom
+  (`SKEL_Head`, `SKEL_Neck`, `SKEL_L_Hand`/`SKEL_R_Hand`, `SKEL_L_Finger*`/
+  `SKEL_R_Finger*`, `FB_*` — les os du rig facial —, `RB_Neck`), vérifiés pour de vrai
+  sur le mesh de référence réel du template `template_female_a_f_y_business_02.blend`
+  (58 groupes de vertex au total, voir skill `gtav-ped-modding`). Une caméra `skin`
+  reçoit `--skin-prompt` (nouveau CLI arg, défaut `DEFAULT_SKIN_PROMPT` = "natural
+  human skin, photorealistic skin texture, subtle subsurface scattering, no clothing,
+  no fabric, no jewelry" si non fourni) à la place du prompt vêtement `--prompt`.
+  Nouveau paramètre MCP `skin_prompt` (optionnel) sur `generate_ai_texture_reskin`
+  (`mcp_server/server.py`), propagé par `mcp_server/ai_reskin_runner.generate_reskin()`
+  vers `--skin-prompt` uniquement s'il est fourni (sinon pas de flag du tout, le script
+  applique son propre défaut) ; même garde-fou NSFW (`prompt_refiner._check_blocked`)
+  appliqué aux DEUX prompts.
+  **Découverte honnête en testant pour de vrai sur le template réel** :
+  `find_reference_mesh()` (inchangé, logique du point 9) sélectionne sur ce template un
+  mesh (`SKEL_ROOT.002`, 1866 sommets/3041 faces) dont les 58 groupes de vertex sont
+  QUASI EXCLUSIVEMENT tête/cou/mains/doigts/visage (confirmé en inspectant les poids
+  réels : score moyen de "peauité" sur toutes les faces = 0.966, seules 40/3041 faces
+  <0.1) — ce mesh de référence ne couvre donc pas du tout le torse/jambes habillés
+  (probablement un composant "corps nu" séparé des pièces de vêtement dans ce template
+  précis). Résultat : les 6 caméras se classent TOUTES `skin` sur ce run réel, ce qui
+  est géométriquement correct (pas un bug du classifieur) mais ne permet pas de
+  comparaison visuelle peau/vêtement sur CE template précis. Le mécanisme lui-même est
+  vérifié correct séparément par un test synthétique headless Blender (mesh jouet à 4
+  faces, 2 groupes de vertex distincts peau/vêtement, `classify_camera_regions()`
+  renvoie bien `skin` pour les faces peau et `clothing` pour les faces vêtement — voir
+  `/tmp/test_classify_synthetic.py`, non committé, reproductible). Limite restante
+  honnête : non revalidé visuellement sur un mesh réel ayant à la fois torse habillé et
+  zones de peau dans la même caméra.
+- **Mitigation de l'artefact de mosaïque en arrière-plan** : investigation d'abord — le
+  compositeur de `render_guide_image()` pousse déjà correctement l'arrière-plan (zone
+  sans intersection géométrique, Z-pass = valeur sentinelle très grande) vers le noir
+  pur via `Map Range` + `use_clamp=True` (code inchangé, déjà correct) ; ce n'est donc
+  PAS un bug de construction de la depth map. La mosaïque vient du comportement de
+  ControlNet-depth SDXL lui-même sur une zone de profondeur plate/sans structure : sans
+  contrainte géométrique là-bas, le modèle "invente" une texture répétée du matériau
+  demandé par le prompt. Fix choisi (minimal, pas de triple sur-ingénierie) :
+  1. `scripts/sd_view_synthesis.py` : négatif par défaut étendu avec "patterned
+     background, busy background, repeating pattern, tiled texture, mosaic background,
+     checkerboard background".
+  2. `scripts/ai_texture_reskin.py` (`main()`) : chaque prompt effectif par caméra
+     reçoit un suffixe positif ", plain neutral background, solid color background"
+     avant d'être passé à `--prompt`.
+  Approche (a) (forcer la depth map via l'alpha du compositeur) explicitement écartée :
+  déjà correcte, rien à corriger là. Résultat vérifié en regardant les images
+  réellement produites (`/tmp/reskin_test5/testped2_reskin_cam_ring_0_view.png` vs
+  l'ancien `/tmp/reskin_test4/.../cam_ring_0_view.png`) : nette amélioration pour les
+  caméras où le sujet occupe la majorité du cadre (arrière-plan devenu un dégradé gris
+  propre, plus de motif répété) ; amélioration partielle seulement pour
+  `reskin_cam_top` (vue plongeante où l'arrière-plan domine le cadre) — un motif de
+  grille reste visible, dit honnêtement, pas de fix supplémentaire tenté cette session.
+  **Vérification empirique de l'approche (c)** (l'artefact ne se propage pas au bake
+  final) : inspection directe de `testped2_reskin.png` (texture finale accumulée) —
+  aucune trace de motif en mosaïque nulle part, y compris dans la zone bakée depuis
+  `reskin_cam_top` (petite bande crâne/cheveux, rendu propre). Confirme la lecture du
+  mécanisme de bake (`bake_camera_partition()`, point 11) : seuls les texels à
+  l'intérieur des îlots UV réels du mesh sont jamais échantillonnés (via l'UV projetée
+  par sommet), donc les pixels d'arrière-plan loin de la silhouette du mesh ne sont
+  jamais lus — l'artefact est purement cosmétique sur l'image intermédiaire par caméra,
+  sans impact sur le livrable final.
+- **Tests** : `tests/test_ai_reskin_runner.py` — 2 nouveaux tests mockés (aucun GPU/
+  Blender requis) vérifient que `skin_prompt` atteint bien `--skin-prompt` dans la
+  commande Blender quand fourni, et que le flag est absent sinon. 64/64 tests verts
+  après ces changements (62 précédents + 2 nouveaux).
+- **Run réel exécuté** : `blender --background --python scripts/ai_texture_reskin.py`
+  contre `templates/template_female_a_f_y_business_02.blend`, prompt vêtement "a dark
+  leather jacket, photorealistic fabric, studio lighting", 6 caméras, 512×512,
+  `--controlnet-conditioning-scale 0.8 --steps 25` — succès de bout en bout (depth maps,
+  synthèse SD par caméra avec le prompt peau par défaut puisque toutes classées `skin`,
+  bake, texture finale sauvegardée). Pas de régression de qualité visible par rapport à
+  la texture `6f9523d` (mêmes zones visage/mains cohérentes, pas de nouveau motif
+  d'armure/mosaïque).
+- **Limitations connues restantes** : classification peau/vêtement non revalidée
+  visuellement sur un mesh réel mixte (ce template n'en a pas) — validée uniquement par
+  test synthétique + lecture de code ; mosaïque d'arrière-plan atténuée mais pas
+  éliminée sur les caméras où l'arrière-plan domine le cadre (`reskin_cam_top`) ;
+  occlusion toujours non implémentée (hérité) ; pas de validation en jeu.
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).

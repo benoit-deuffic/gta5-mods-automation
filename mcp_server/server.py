@@ -173,7 +173,8 @@ def compile_gtav_ped(target_name: str, fbx_path: str, gender: str = "female") ->
 
 
 @mcp.tool()
-def generate_ai_texture_reskin(target_name: str, prompt: str, num_cameras: int = 6,
+def generate_ai_texture_reskin(target_name: str, prompt: str, skin_prompt: str | None = None,
+                                num_cameras: int = 6,
                                 texture_size: int = 512, controlnet_conditioning_scale: float = 0.8,
                                 steps: int = 25, gender: str = "female") -> dict:
     """Headless, multi-camera, UV-aware AI texture reskin for a GTA V ped
@@ -183,6 +184,13 @@ def generate_ai_texture_reskin(target_name: str, prompt: str, num_cameras: int =
     run in the sd-local venv, text-to-image driven by the prompt and
     structurally constrained by the depth map), and bakes the results back
     onto the mesh's real diffuse UV layout.
+
+    `prompt` is the main/clothing look, applied to every camera region NOT
+    classified as skin-dominant. `skin_prompt` (optional) is used instead for
+    cameras whose assigned faces are dominantly weighted to skin vertex
+    groups (head/neck/hands/fingers) -- defaults to a neutral "natural skin
+    tone" prompt when not given, so skin regions never silently inherit the
+    clothing material anymore (docs/architecture-decisions.md point 15).
 
     This is a reskin/visual-preview step, NOT a replacement for
     compile_gtav_ped -- it does not produce a new rigged mesh, only a
@@ -198,10 +206,13 @@ def generate_ai_texture_reskin(target_name: str, prompt: str, num_cameras: int =
 
     Applies the same NSFW/content guardrail as refine_prompt_with_ollama
     (prompt_refiner's blocked-keyword list) before running anything, since
-    this tool also accepts a raw user prompt feeding an external generator.
+    this tool also accepts a raw user prompt feeding an external generator
+    -- the check runs on BOTH prompt and skin_prompt when given.
     """
     target_name = _normalize_target_name(target_name)
     prompt_refiner._check_blocked(prompt)
+    if skin_prompt:
+        prompt_refiner._check_blocked(skin_prompt)
 
     blender_cfg = _CONFIG.get("blender", {})
     template_key = "template_female_path" if gender == "female" else "template_male_path"
@@ -213,6 +224,7 @@ def generate_ai_texture_reskin(target_name: str, prompt: str, num_cameras: int =
         output_dir=output_dir,
         model_name=target_name,
         prompt=prompt,
+        skin_prompt=skin_prompt,
         num_cameras=num_cameras,
         texture_size=texture_size,
         controlnet_conditioning_scale=controlnet_conditioning_scale,

@@ -65,6 +65,22 @@ from blender_rig_export import find_reference_armature, find_reference_mesh  # n
 DEFAULT_SD_PYTHON = os.path.expanduser("~/tools/sd-local/venv/bin/python")
 DEFAULT_SD_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sd_view_synthesis.py")
 
+DEFAULT_SKIN_PROMPT = (
+    "natural human skin, photorealistic skin texture, subtle subsurface scattering, "
+    "no clothing, no fabric, no jewelry"
+)
+
+# Vertex-group name prefixes that indicate "this vertex is skin, not clothing" on the
+# real a_f_y_business_02 template (verified on bora, see gtav-ped-modding skill): the
+# GTA skeleton's head/neck/hand/finger bones plus the FB_* facial-rig bones. Everything
+# else (spine, forearm roll, etc.) defaults to the clothing prompt -- a camera that sees
+# a bare forearm with no explicit skin weighting there will just get the clothing look,
+# a known, acceptable simplification (no outfit-aware sleeve-length detection).
+SKIN_VGROUP_PREFIXES = (
+    "SKEL_Head", "SKEL_Neck", "SKEL_L_Hand", "SKEL_R_Hand",
+    "SKEL_L_Finger", "SKEL_R_Finger", "FB_", "RB_Neck",
+)
+
 
 def parse_args():
     raw_args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
@@ -72,7 +88,14 @@ def parse_args():
     p.add_argument("--template", required=True)
     p.add_argument("--output-dir", required=True)
     p.add_argument("--model-name", required=True)
-    p.add_argument("--prompt", required=True)
+    p.add_argument("--prompt", required=True,
+                   help="Main/clothing prompt, used for every camera region that is NOT "
+                        "classified as skin-dominant (see classify_camera_regions()).")
+    p.add_argument("--skin-prompt", default=None,
+                   help="Prompt used for cameras whose assigned faces are dominantly weighted "
+                        "to skin-related vertex groups (head/neck/hands, see SKIN_VGROUP_PREFIXES). "
+                        "Defaults to a neutral 'natural skin tone' prompt if not given -- never "
+                        "falls back silently to the clothing prompt, which was the point-14 bug.")
     p.add_argument("--num-cameras", type=int, default=6,
                    help="4 = front/back/left/right ring only; 6 adds top+bottom "
                         "for shoulder/crotch seam coverage (see docstring point 2).")
@@ -292,6 +315,65 @@ def partition_faces_to_cameras(mesh_obj, cameras):
     return assignment
 
 
+def _face_skin_score(mesh, poly, skin_group_indices):
+    """Average, across this face's vertices, of (weight on skin-related
+    vertex groups) / (total weight on ANY vertex group that vertex
+    belongs to). Returns 0..1 -- higher means more skin-dominant. Using a
+    per-vertex ratio (not raw weight) makes this robust to a vertex having
+    many small peripheral group memberships from normal skinning blend.
+    """
+    scores = []
+    for loop_index in poly.loop_indices:
+        vert_index = mesh.loops[loop_index].vertex_index
+        vert = mesh.vertices[vert_index]
+        skin_w = 0.0
+        total_w = 0.0
+        for ge in vert.groups:
+            total_w += ge.weight
+            if ge.group in skin_group_indices:
+                skin_w += ge.weight
+        if total_w > 1e-6:
+            scores.append(skin_w / total_w)
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def classify_camera_regions(mesh_obj, per_cam_faces, skin_threshold=0.35):
+    """Classifies each camera's exclusive face partition as 'skin' or
+    'clothing' using the mesh's real SKEL_*/FB_* vertex groups (see
+    SKIN_VGROUP_PREFIXES) -- this is what main() uses to pick a per-camera
+    prompt instead of applying the single clothing prompt everywhere
+    (docs/architecture-decisions.md point 14's documented limitation).
+
+    A camera is 'skin' when the AREA-weighted average skin score across its
+    assigned faces is >= skin_threshold (area weighting, not a plain face
+    count, so a camera dominated by a few large clothing faces plus many
+    tiny finger faces isn't mis-classified as skin). Falls back to
+    'clothing' for every camera if the mesh has no recognizable skin
+    vertex groups at all (e.g. a non-standard/no-rig test mesh), which
+    matches the pre-existing single-prompt behaviour exactly.
+    """
+    mesh = mesh_obj.data
+    skin_group_indices = {
+        g.index for g in mesh_obj.vertex_groups
+        if any(g.name.startswith(prefix) for prefix in SKIN_VGROUP_PREFIXES)
+    }
+    if not skin_group_indices:
+        return {cam_name: "clothing" for cam_name in per_cam_faces}
+
+    regions = {}
+    for cam_name, face_indices in per_cam_faces.items():
+        total_area = 0.0
+        skin_area = 0.0
+        for face_idx in face_indices:
+            poly = mesh.polygons[face_idx]
+            score = _face_skin_score(mesh, poly, skin_group_indices)
+            total_area += poly.area
+            skin_area += poly.area * score
+        fraction = (skin_area / total_area) if total_area > 1e-9 else 0.0
+        regions[cam_name] = "skin" if fraction >= skin_threshold else "clothing"
+    return regions
+
+
 def find_diffuse_uv_layer(mesh):
     """Picks the mesh's real diffuse UV layer (not any temp/projected one we
     add ourselves). Real Sollumz-imported meshes don't reliably name UV
@@ -417,6 +499,10 @@ def main():
     for cam_name, faces in per_cam_faces.items():
         print(f"       {cam_name}: {len(faces)} faces")
 
+    skin_prompt = args.skin_prompt or DEFAULT_SKIN_PROMPT
+    camera_regions = classify_camera_regions(reference_mesh, per_cam_faces)
+    print(f"[INFO] Camera region classification (skin vs clothing): {camera_regions}")
+
     target_image = bpy.data.images.new(
         name=f"{args.model_name}_reskin", width=args.texture_size, height=args.texture_size, alpha=False)
     # Seed with the existing texture's content where available so unassigned
@@ -436,6 +522,7 @@ def main():
     manifest = {
         "model_name": args.model_name,
         "prompt": args.prompt,
+        "skin_prompt": skin_prompt,
         "num_cameras": len(cameras),
         "texture_size": args.texture_size,
         "cameras": {},
@@ -451,6 +538,18 @@ def main():
         far_clip = distance + radius * 1.5
         render_guide_image(scene, cam, guide_path, args.render_size, near=near_clip, far=far_clip)
 
+        region = camera_regions.get(cam.name, "clothing")
+        cam_prompt = skin_prompt if region == "skin" else args.prompt
+        # Mosaic-mitigation (docs/architecture-decisions.md point 15): far-depth/
+        # background pixels are correctly flat black already (render_guide_image's
+        # Map Range use_clamp), but ControlNet-depth still hallucinates a repeated
+        # tiled pattern of the prompt's material over that flat region since
+        # nothing in the prompt says what to do with it. Appending an explicit,
+        # content-neutral background instruction (not a change to which region's
+        # prompt is picked) measurably reduces this without touching the depth
+        # map itself.
+        cam_prompt = f"{cam_prompt}, plain neutral background, solid color background"
+
         if args.skip_sd:
             view_path = guide_path
         else:
@@ -458,12 +557,12 @@ def main():
             cmd = [
                 args.sd_python, args.sd_script,
                 "--depth-image", guide_path,
-                "--prompt", args.prompt,
+                "--prompt", cam_prompt,
                 "--output", view_path,
                 "--controlnet-conditioning-scale", str(args.controlnet_conditioning_scale),
                 "--steps", str(args.steps),
             ]
-            print(f"[INFO] Running SD view synthesis for {cam.name}: {' '.join(cmd)}")
+            print(f"[INFO] Running SD view synthesis for {cam.name} (region={region}): {' '.join(cmd)}")
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if proc.returncode != 0:
                 print(f"[WARN] SD synthesis failed for {cam.name}, falling back to guide image.\n{proc.stderr[-2000:]}")
@@ -473,6 +572,8 @@ def main():
             bpy.context, reference_mesh, faces, cam, view_path, target_image, diffuse_uv_name, args.texture_size)
         manifest["cameras"][cam.name] = {
             "num_faces": len(faces),
+            "region": region,
+            "prompt_used": cam_prompt,
             "guide_image": guide_path,
             "view_image": view_path,
             "baked": baked,

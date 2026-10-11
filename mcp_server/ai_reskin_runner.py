@@ -48,6 +48,7 @@ def is_pipeline_available() -> bool:
 
 
 def generate_reskin(template_path: Path, output_dir: Path, model_name: str, prompt: str,
+                     skin_prompt: str | None = None,
                      num_cameras: int = 6, texture_size: int = 512,
                      controlnet_conditioning_scale: float = 0.8,
                      steps: int = 25, timeout_s: int = 900) -> ReskinResult:
@@ -74,6 +75,8 @@ def generate_reskin(template_path: Path, output_dir: Path, model_name: str, prom
         "--steps", str(steps),
         "--sd-python", sd_python,
     ]
+    if skin_prompt:
+        cmd += ["--skin-prompt", skin_prompt]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
