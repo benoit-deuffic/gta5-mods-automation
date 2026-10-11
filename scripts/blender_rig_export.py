@@ -203,6 +203,60 @@ def main():
     export_path = f"{args.output_dir}/{args.model_name}"
     addon_key = next((k for k in bpy.context.preferences.addons.keys() if "sollumz" in k.lower()), None)
     if addon_key:
+        # A plain imported mesh carries none of Sollumz's own custom
+        # properties (sollumz_type etc.) -- export_assets silently exports
+        # ONLY the armature's Fragment (.yft, the skeleton) and skips the
+        # mesh entirely if it isn't recognized as a Sollumz Drawable Model,
+        # so no .ydd/.ytd is ever produced for a foreign/rigged-in mesh
+        # (found by actually running this against a real source mesh, not
+        # just mocked bpy calls). sollumz.converttodrawable() wraps the mesh
+        # into a proper Drawable > Drawable Model hierarchy so the exporter
+        # recognizes and emits it. NOTE: the operator repurposes the
+        # ORIGINAL object into an EMPTY (the new Drawable root) and creates
+        # a NEW mesh object named "<original>.model" holding the actual
+        # mesh data/modifiers/vertex groups (verified for real: modifiers
+        # and vertex groups survive the conversion onto the new object) --
+        # re-resolve both afterwards, the old `target_mesh` reference is no
+        # longer a mesh.
+        # A GTA V Fragment (.yft) supports exactly ONE Drawable -- the base
+        # ped template's own original body mesh is already a Drawable
+        # parented under this same armature, so exporting both produces a
+        # Sollumz warning ("Fragment has multiple Drawables... only X will
+        # be exported, Y ignored") and SILENTLY drops our new mesh, keeping
+        # the untouched base ped body instead (found by actually running
+        # this, not inferred). This step is a full geometry REPLACEMENT
+        # pipeline (vs. the texture-only reskin path in
+        # ai_texture_reskin.py), so the old body Drawable(s) must be removed
+        # from the armature before export, after weight transfer has
+        # already used reference_mesh as its source above.
+        old_drawable_roots = {obj for obj in reference_armature.children if obj is not target_mesh}
+        for root_obj in old_drawable_roots:
+            for child in list(root_obj.children):
+                bpy.data.objects.remove(child, do_unlink=True)
+            bpy.data.objects.remove(root_obj, do_unlink=True)
+
+        # A foreign imported mesh has no Sollumz-shader material -- export
+        # aborts with "has no Sollumz materials! Aborting..." without one
+        # (found by actually running this, not inferred). Give it a minimal
+        # node-based material and convert it to the default Sollumz ped
+        # shader via the addon's own operator (same one the Shader Manager
+        # UI calls) rather than hand-building shader node graphs.
+        if not target_mesh.data.materials:
+            placeholder_mat = bpy.data.materials.new(f"{args.model_name}_mat")
+            placeholder_mat.use_nodes = True
+            target_mesh.data.materials.append(placeholder_mat)
+        bpy.ops.object.select_all(action='DESELECT')
+        target_mesh.select_set(True)
+        bpy.context.view_layer.objects.active = target_mesh
+        bpy.ops.sollumz.convertmaterialtoselected()
+
+        mesh_original_name = target_mesh.name
+        bpy.ops.object.select_all(action='DESELECT')
+        target_mesh.select_set(True)
+        bpy.context.view_layer.objects.active = target_mesh
+        bpy.ops.sollumz.converttodrawable()
+        drawable_root = bpy.data.objects[mesh_original_name]
+        drawable_model = bpy.data.objects[f"{mesh_original_name}.model"]
         # sollumz.export_assets names its output file(s) after the exported
         # object(s), not after a filename parameter -- rename the armature
         # (and therefore its drawable dictionary) to --model-name so the
@@ -210,9 +264,9 @@ def main():
         # scripts/package_builder.py expect to find.
         reference_armature.name = args.model_name
 
-        bpy.context.view_layer.objects.active = target_mesh
+        bpy.context.view_layer.objects.active = drawable_model
         for obj in bpy.data.objects:
-            obj.select_set(obj in (target_mesh, reference_armature))
+            obj.select_set(obj in (drawable_root, drawable_model, reference_armature))
         # Real operator (spec used the non-existent sollumz.export_ped):
         bpy.ops.sollumz.export_assets(
             directory=args.output_dir,

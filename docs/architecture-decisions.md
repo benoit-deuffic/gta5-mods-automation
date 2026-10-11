@@ -503,6 +503,95 @@ restent **intacts** — seul ce qui nourrit chaque appel à
   éliminée sur les caméras où l'arrière-plan domine le cadre (`reskin_cam_top`) ;
   occlusion toujours non implémentée (hérité) ; pas de validation en jeu.
 
+15. **Premier run RÉEL de bout en bout des 4 outils MCP en séquence, bora,
+    2026-10-11** — `generate_raw_3d_asset` (mock fixture, voir plus bas) →
+    `compile_gtav_ped` → `generate_ai_texture_reskin` (réel, 211s) →
+    `sync_usermods_manifest` → `build_delivery_package`, en appelant les
+    fonctions `mcp_server/server.py` directement (mêmes fonctions que celles
+    exposées via FastMCP). A débusqué et corrigé plusieurs vrais trous de
+    câblage que les tests unitaires par composant ne pouvaient pas voir :
+    - **Conversion binaire jamais câblée dans le chemin réel** :
+      `compile_gtav_ped` et `sync_usermods_manifest` ne produisaient QUE du
+      CodeWalker-XML (`.ydd.xml`/`.yft.xml`/`.ytd.xml`/`.ymt.xml`) —
+      `scripts/codewalker_convert.py` n'était exercé que directement par
+      `tests/test_codewalker_cli_integration.py`, jamais appelé par les
+      outils MCP eux-mêmes. Conséquence concrète avant correction : le zip
+      de livraison ne contenait jamais de vrais binaires RAGE, seulement
+      des intermédiaires XML que le jeu ne charge pas. Corrigé dans
+      `mcp_server/server.py` (`compile_gtav_ped` appelle
+      `codewalker_convert.convert_xml_to_binary` après un compile réel
+      [pas mock], `sync_usermods_manifest` fait de même pour le `.ymt`).
+    - **Fixture de test `tests/fixtures/mock_humanoid.fbx` invalide pour un
+      vrai Blender** : c'était un stub FBX ASCII de 7 lignes (padding de
+      commentaires pour passer le seuil de taille `min_fbx_bytes`), jamais
+      réellement importé par un Blender réel avant ce run — `Error: ASCII
+      FBX files are not supported`. Remplacé par un vrai FBX binaire généré
+      via `blender --export_scene.fbx` (cylindre simple avec vertex group,
+      102 Ko, au-dessus du seuil de validation).
+    - **Fragment (.yft) ne supporte qu'un seul Drawable** :
+      `scripts/blender_rig_export.py` important un nouveau maillage et le
+      import nouvel onglet "mock_humanoid_body" en plus du corps déjà
+      présent sur le template (`a_f_y_business_02.mesh`) produisait un
+      avertissement Sollumz silencieux ("Fragment has multiple Drawables...
+      only X will be exported, Y ignored") qui gardait le corps D'ORIGINE
+      et ignorait le nouveau maillage sans erreur — un faux positif de
+      pipeline (export "réussi" mais ped inchangé). Corrigé : les anciens
+      objets Drawable de l'armature de référence sont supprimés avant
+      export (ce script fait un remplacement complet de géométrie, pas un
+      ajout).
+    - **Maillage importé sans matériau Sollumz** : un maillage étranger
+      n'a aucune des propriétés matériau personnalisées de Sollumz —
+      l'export échouait avec `Error: mock_humanoid_body has no Sollumz
+      materials! Aborting...` puis un `AttributeError` sur
+      `drawable.skeleton.bones`. Corrigé : un matériau de base (`use_nodes
+      = True`) est créé puis converti via l'opérateur réel
+      `bpy.ops.sollumz.convertmaterialtoselected()` (le même que le Shader
+      Manager de l'UI Sollumz appelle) avant `sollumz.converttodrawable()`.
+    - **`sollumz.converttodrawable()` transforme l'objet mesh ORIGINAL en
+      EMPTY** (nouvelle racine Drawable) et crée un NOUVEL objet mesh
+      `"<nom>.model"` qui porte les modifiers/vertex groups (vérifié : ils
+      survivent à la conversion) — toute référence Python à l'objet mesh
+      original doit être ré-résolue après cet appel, et c'est ce nouvel
+      objet `.model` (pas l'empty) qu'il faut sélectionner pour l'export.
+    - **Limite non résolue, documentée honnêtement** : avec ces corrections,
+      le chemin "nouvelle géométrie complète" (import FBX générique →
+      rig → export) produit désormais un `.yft` binaire réel et non-mock
+      (vérifié : 86 580 octets, converti avec succès par `codewalker-cli`)
+      mais SEULEMENT comme fragment mono-Drawable (tout le corps en un seul
+      maillage) — il ne reproduit PAS la structure multi-composants du ped
+      de base réel (`.ydd` séparé avec des drawables par composant
+      head/uppr/lowr/hand/feet, chacun avec plusieurs variantes, comme
+      attendu par `CPedVariationInfo`/`availComp`). Générer cette structure
+      multi-composants à partir d'un maillage IA brut unique est un travail
+      d'auteur Sollumz plus profond, non fait cette session.
+    - **Livraison finale produite via la voie "reskin texture seule"**
+      (recommandée par le skill `gtav-ped-modding` pour ce cas d'usage,
+      cf. aussi point 13) plutôt que la voie "nouvelle géométrie complète"
+      ci-dessus : `.ydd`/`.yft`/`.ymt` = copie/renommage des fichiers réels
+      déjà extraits et round-trippés de `a_f_y_business_02` (point 12),
+      `.ytd` = packing réel de la texture générée par
+      `generate_ai_texture_reskin` (prompt "a dark leather jacket texture")
+      dans `uppr_diff_000_a_whi` via `scripts/dds_pack_and_validate.py`, le
+      tout reconverti en binaire réel via `codewalker-cli convert` : `.ydd`
+      744 737 octets, `.yft` 13 995 octets, `.ytd` 2 996 055 octets, `.ymt`
+      531 octets (5 composants). `ap_m.xml` contient bien
+      `<Item><Name>testped_reskin01</Name></Item>` (minuscule, via
+      `_normalize_target_name`). Zip final (`dist/testped_reskin01_delivery.zip`,
+      9,6 Mo) vérifié avec une lecture directe `zipfile.ZipFile(...).infolist()`
+      (pas seulement la valeur de retour de l'outil) : les deux layouts
+      (`addonpeds_pedselector/` et `dlcpack_standalone/<name>/`) contiennent
+      bien les 4 binaires + XML + manifeste au bon endroit.
+    - **Bug `codewalker-cli inspect` pré-existant reconfirmé** sur ce
+      nouveau `.ytd` (point 13) : `Exception: illegal position!`, jamais
+      corrigé, documenté dans `docs/INSTALL_AND_TEST_INGAME.md` comme la
+      principale inconnue à valider par le test en jeu réel.
+    - **Génération 3D source en mode mock assumé** : aucune clé
+      Meshy/Tripo valide avec crédits disponibles cette session — l'étape
+      `generate_raw_3d_asset` tourne donc en mock (fixture FBX, `mock=True`
+      explicite dans le retour), ce qui est honnête et n'affecte PAS la
+      livraison finale (voie reskin texture, qui ne consomme pas cette
+      sortie). 67 tests passent après ces corrections (était 64).
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).

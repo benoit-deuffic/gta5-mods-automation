@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_server import ai_reskin_runner, blender_runner, meshy_client, prompt_refiner, validator
 from mcp_server.text3d_backend import get_backend
-from scripts import package_builder, xml_manifest_updater, ymt_builder
+from scripts import codewalker_convert, package_builder, xml_manifest_updater, ymt_builder
 
 mcp = FastMCP("gtav-ped-mcp")
 
@@ -155,6 +155,27 @@ def compile_gtav_ped(target_name: str, fbx_path: str, gender: str = "female") ->
         timeout_s=blender_cfg.get("timeout_seconds", 300),
     )
 
+    # Blender/Sollumz only ever produces CodeWalker-XML (CWXML) on Linux --
+    # native binary export needs PyMateria (Windows-only, see
+    # docs/architecture-decisions.md point 12). Without this step the
+    # delivery zip would only ever contain .ydd.xml/.yft.xml/.ytd.xml, never
+    # the real .ydd/.yft/.ytd binaries the game actually loads -- a silent
+    # wiring gap: nothing upstream called scripts/codewalker_convert.py, it
+    # was only ever exercised directly by tests/test_codewalker_cli_integration.py.
+    conversion = None
+    if result.status == "compiled":
+        conv_result = codewalker_convert.convert_xml_to_binary(
+            xml_dir=compiled_dir, output_dir=compiled_dir, model_name=target_name,
+            extensions=(".ydd", ".yft", ".ytd"),
+        )
+        conversion = {
+            "status": conv_result.status,
+            "produced_files": conv_result.produced_files,
+            "message": conv_result.message,
+        }
+        if conv_result.produced_files:
+            result.produced_files = sorted(set(result.produced_files) | {Path(p) for p in conv_result.produced_files})
+
     artifact_report = validator.validate_compiled_artifacts(compiled_dir, target_name)
 
     return {
@@ -164,6 +185,7 @@ def compile_gtav_ped(target_name: str, fbx_path: str, gender: str = "female") ->
         "output_dir": str(result.output_dir),
         "produced_files": [str(p) for p in result.produced_files],
         "log_tail": result.log[-2000:],
+        "binary_conversion": conversion,
         "validation": {
             "ok": artifact_report.ok,
             "errors": artifact_report.errors,
@@ -266,6 +288,18 @@ def sync_usermods_manifest(target_name: str, ped_type: str = "CIVFEMALE", gender
     ymt_path = compiled_dir / f"{target_name}.ymt.xml"
     ymt_builder.write_ymt_xml(ymt_path, target_name)
 
+    # Same wiring gap as compile_gtav_ped: the .ymt was only ever emitted as
+    # CW-XML here, never converted to the binary CPedVariationInfo the game
+    # reads (see docs/architecture-decisions.md point 11 for the real,
+    # round-trip-verified schema/CLI this calls).
+    conv_result = codewalker_convert.convert_xml_to_binary(
+        xml_dir=compiled_dir, output_dir=compiled_dir, model_name=target_name, extensions=(".ymt",))
+    ymt_binary_conversion = {
+        "status": conv_result.status,
+        "produced_files": conv_result.produced_files,
+        "message": conv_result.message,
+    }
+
     xml_manifest_updater.add_ped_to_manifest(
         manifest_path, target_name, gender=gender, is_streamed_gfx=is_streamed_gfx, ped_type=ped_type)
 
@@ -275,6 +309,7 @@ def sync_usermods_manifest(target_name: str, ped_type: str = "CIVFEMALE", gender
         "target_name": target_name,
         "manifest_path": str(manifest_path),
         "ymt_path": str(ymt_path),
+        "ymt_binary_conversion": ymt_binary_conversion,
         "registered_peds": xml_manifest_updater.list_registered_peds(manifest_path),
         "validation": {
             "ok": manifest_report.ok,
