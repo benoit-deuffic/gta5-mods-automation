@@ -17,3 +17,9 @@ tools/CodeWalkerCli/obj/
 tools/CodeWalkerCli/publish/
 *.dll
 *.pdb
+
+# Host-specific generated state (hardware profile differs per machine,
+# see scripts/bootstrap_ollama.sh / scripts/hw_detect.py) -- never the
+# repo's source of truth, just local runtime output.
+config/ollama.json
+workspace_ollama_serve.log

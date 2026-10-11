@@ -1,18 +1,28 @@
 # Bootstrap script for "bora" — the dedicated Windows workstation
 # (i5-14400 / RTX 5070 12GB) that will run Blender+Sollumz natively and
 # host GTA V for in-game testing (docs/architecture-decisions.md points
-# 4, 8, 9). NOT executed/validated from this Linux sandbox — review before
-# running on bora. Idempotent: safe to re-run.
+# 4, 8, 9). Idempotent: safe to re-run.
+#
+# Ollama (local LLM for prompt enrichment, see point 7) is installed INSIDE
+# WSL via scripts/bootstrap_ollama.sh, not natively on Windows -- that's
+# where the pipeline's Python env and GPU passthrough actually live on this
+# host. Confirmed on bora: nvidia-smi inside WSL2 reports the RTX 5070 with
+# 12227 MiB VRAM (hw_detect.py tier "gpu-large" -> qwen2.5:14b-instruct +
+# llava:13b).
 #
 # Usage (run as Administrator in PowerShell on bora):
 #   irm https://raw.githubusercontent.com/benoit-deuffic/gta5-mods-automation/main/scripts/bootstrap_bora.ps1 | iex
 # or locally:
-#   .\bootstrap_bora.ps1 [-RepoUrl <url>] [-ProjectDir <path>] [-SkipGame]
+#   .\bootstrap_bora.ps1 [-RepoUrl <url>] [-ProjectDir <path>] `
+#     [-WslDistro <name>] [-WslProjectDir <path>] [-SkipGame] [-SkipOllama]
 
 param(
     [string]$RepoUrl = "https://github.com/benoit-deuffic/gta5-mods-automation.git",
     [string]$ProjectDir = "$env:USERPROFILE\gta5-mods-automation",
-    [switch]$SkipGame
+    [string]$WslDistro = "",
+    [string]$WslProjectDir = "/home/benoit/projects/gta5-mods-automation",
+    [switch]$SkipGame,
+    [switch]$SkipOllama
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,6 +93,39 @@ if (Test-CommandExists "tailscale") {
     tailscale status
 } else {
     Write-Warning "Tailscale not found. Install from https://tailscale.com/download/windows if this host needs remote access."
+}
+
+Write-Step "Installing Ollama + ped-generation prompt-refinement models (inside WSL)"
+Write-Host @"
+Ollama is installed INSIDE WSL, not natively on Windows: this is where the
+pipeline's Python env, GPU access (nvidia-smi passthrough confirmed working
+in WSL2 on this host), and scripts/prompt_refiner.py all actually run (see
+docs/architecture-decisions.md point 7 -- Ollama enriches the text prompt
+before 3D generation, it does NOT generate 3D geometry itself). Delegating to
+the already-tested scripts/bootstrap_ollama.sh instead of reimplementing
+hardware detection in PowerShell.
+"@ -ForegroundColor Yellow
+
+if ($SkipOllama) {
+    Write-Host "Skipping Ollama setup (-SkipOllama)."
+} elseif (-not (Test-CommandExists "wsl")) {
+    Write-Warning "WSL not found; cannot install Ollama inside it. Install WSL2 first, or re-run with -SkipOllama."
+} else {
+    $distroArg = @()
+    if ($WslDistro -ne "") { $distroArg = @("-d", $WslDistro) }
+
+    $wslCheck = wsl @distroArg -- test -d $WslProjectDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Project not found at $WslProjectDir inside WSL. Clone it there first (git clone $RepoUrl $WslProjectDir), or pass -WslProjectDir <path>. Skipping Ollama setup."
+    } else {
+        Write-Host "Running scripts/bootstrap_ollama.sh inside WSL (auto-detects this host's RTX 5070 -> gpu-large tier: qwen2.5:14b-instruct + llava:13b)..."
+        wsl @distroArg -- bash -lc "cd '$WslProjectDir' && bash scripts/bootstrap_ollama.sh"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "bootstrap_ollama.sh exited non-zero inside WSL (exit $LASTEXITCODE). Check the output above."
+        } else {
+            Write-Host "Ollama ready inside WSL. config/ollama.json written there; mcp_server/prompt_refiner.py picks it up automatically." -ForegroundColor Green
+        }
+    }
 }
 
 Write-Step "Cloning/updating the project repo"
