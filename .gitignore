@@ -23,3 +23,11 @@ tools/CodeWalkerCli/publish/
 # repo's source of truth, just local runtime output.
 config/ollama.json
 workspace_ollama_serve.log
+
+# NEVER commit extracted Rockstar game assets (hard rule, see
+# docs/analyse-prerequis.md and the gtav-ped-modding skill). Extracted base
+# ped files (.ydd/.yft/.ymt/.ytd/.yed/.awc from CodeWalker/OpenIV) must stay
+# local to the machine that extracted them, never pushed to the repo.
+peds/
+*.rpf
+templates/*.blend

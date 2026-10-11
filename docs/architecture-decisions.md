@@ -126,6 +126,47 @@ Suite à `docs/analyse-prerequis.md`. Décisions validées avec l'utilisateur le
       de convertir un `.ymt.xml` (`[SKIP]` explicite) plutôt que de produire
       un binaire corrompu silencieusement. Tâche de suivi ajoutée au plan.
 
+11. **`scripts/ymt_builder.py` réécrit et validé par round-trip réel (bora,
+    2026-10-11)** — corrige le point 10. Le vrai schéma `CPedVariationInfo`
+    (112 octets) a été extrait directement de
+    `CodeWalker.Core/GameFiles/MetaTypes/MetaTypes.cs` (`MetaStructureInfo`
+    pour `CPedVariationInfo`/`CPVComponentData`/`CPVDrawblData`/
+    `CPVTextureData`/`CPVDrawblData__CPVClothComponentData`/`CPedPropInfo`) et
+    des règles de traversée XML→binaire dans
+    `CodeWalker.Core/GameFiles/MetaTypes/XmlMeta.cs` (noms de balises
+    case-sensitive = noms de champs C#, tableaux de structures via `<Item>`
+    enfants, tableaux d'octets bruts via texte espacé, booléens via
+    `value="true/false"`).
+    - Champs racine corrects : `bHasTexVariations`, `bHasDrawblVariations`,
+      `bHasLowLODs`, `bIsSuperLOD`, `availComp`, `aComponentData3`,
+      `aSelectionSets`, `compInfos`, `propInfo`, `dlcName` (pas de `<Name>` —
+      ce champ n'existe pas dans le struct binaire).
+    - **Simplification documentée** : `aSelectionSets` et `compInfos` sont
+      émis comme tableaux valides mais **vides** — `CComponentInfo` encode des
+      métadonnées audio/expression (enum `ePedVarComp`, floats en dump hexa
+      brut) que ce générateur ne tente pas de reproduire ; la permutation
+      visuelle des composants (ce qui compte pour le ped lui-même) dépend de
+      `availComp`/`aComponentData3`, pas de `compInfos`.
+    - `tools/CodeWalkerCli` étendu : conversion `.ymt.xml` activée
+      (`MetaFormat.RSC`, le format générique PSO — `.ymt.xml` ne correspond à
+      aucun cas spécial de `XmlMeta.GetXMLFormat()`, il retombe sur RSC par
+      défaut), plus une nouvelle sous-commande `codewalker-cli inspect
+      <fichier binaire>` qui recharge le binaire produit via le vrai
+      `YmtFile.Load()` de CodeWalker et affiche les blocs PSO reconnus.
+    - **Preuve réelle (pas une supposition)** : un `.ymt` généré pour un ped à
+      5 composants (head/uppr/lowr/hand/feet) convertit en 531 octets, et
+      `codewalker-cli inspect` confirme au retour : bloc racine
+      `CPedVariationInfo` de **112 octets exactement** (taille attendue du
+      struct), plus les blocs imbriqués `CPVComponentData`/`CPVDrawblData`/
+      `CPVTextureData` avec des tailles cohérentes avec 5 items. Testé via
+      `tests/test_codewalker_cli_integration.py`
+      (`test_real_ymt_round_trips_through_codewalker_inspect`).
+    - Exécuté et vérifié sur **bora** (pas le sandbox d'origine) : CodeWalker
+      CLI reconstruit là-bas avec succès (.NET 8 installé sans sudo via
+      `dotnet-install.sh --install-dir "$HOME/.dotnet"`, nécessite
+      `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` sur ce WSL faute de libicu).
+      55 tests passent (était 51).
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).

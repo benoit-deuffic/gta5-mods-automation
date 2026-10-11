@@ -5,24 +5,35 @@ using CodeWalker.GameFiles;
 
 // CLI contract consumed by scripts/codewalker_convert.py:
 //   codewalker-cli convert --in <xml_dir> --out <out_dir> --name <model_name>
-// Converts <model_name>.ydd.xml / .yft.xml / .ytd.xml (CodeWalker-XML, as
-// produced by scripts/blender_rig_export.py's Sollumz CWXML export target)
-// into real binary RAGE files. Verified to work on Linux/.NET 8 against
-// CodeWalker.Core (netstandard2.0) -- see docs/architecture-decisions.md
-// point 10.
+// Converts <model_name>.ydd.xml / .yft.xml / .ytd.xml / .ymt.xml
+// (CodeWalker-XML, as produced by scripts/blender_rig_export.py's Sollumz
+// CWXML export target and scripts/ymt_builder.py) into real binary RAGE
+// files. Verified to work on Linux/.NET 8 against CodeWalker.Core
+// (netstandard2.0) -- see docs/architecture-decisions.md points 10-11.
 //
-// .ymt.xml is INTENTIONALLY NOT handled here yet: scripts/ymt_builder.py's
-// current output does not match the real CPedVariationInfo PSO struct
-// (verified against CodeWalker.Core/GameFiles/MetaTypes/MetaTypes.cs --
-// missing bHasTexVariations/bHasDrawblVariations/bHasLowLODs/bIsSuperLOD,
-// wrong nesting for aComponentData3/aDrawblData3, invented fields like
-// pedXml_availTexs). Converting it now would silently produce a corrupt
-// .ymt. This CLI reports .ymt as "skipped: schema not yet implemented"
-// rather than emit wrong bytes.
+// .ymt uses MetaFormat.RSC (GetRSCData -> GetMeta -> generic PSO/structure
+// traversal), NOT one of the dedicated Ytd/Ydd/Yft cases -- CodeWalker's own
+// XmlMeta.GetXMLFormat() falls through to RSC for any "*.xml" that doesn't
+// match one of its special-cased double extensions, and ".ymt.xml" isn't one
+// of them. scripts/ymt_builder.py's schema was fixed to match the real
+// CPedVariationInfo PSO struct (point 11) before this was enabled.
 
-if (args.Length == 0 || args[0] != "convert")
+if (args.Length == 0)
 {
     Console.Error.WriteLine("Usage: codewalker-cli convert --in <xml_dir> --out <out_dir> --name <model_name>");
+    Console.Error.WriteLine("       codewalker-cli inspect <binary_file> [--type ymt|ydd|yft|ytd]");
+    return 2;
+}
+
+if (args[0] == "inspect")
+{
+    return RunInspect(args);
+}
+
+if (args[0] != "convert")
+{
+    Console.Error.WriteLine("Usage: codewalker-cli convert --in <xml_dir> --out <out_dir> --name <model_name>");
+    Console.Error.WriteLine("       codewalker-cli inspect <binary_file> [--type ymt|ydd|yft|ytd]");
     return 2;
 }
 
@@ -53,6 +64,7 @@ var conversions = new (string suffix, MetaFormat format, bool needsFolder)[]
     (".ytd.xml", MetaFormat.Ytd, true),
     (".ydd.xml", MetaFormat.Ydd, true),
     (".yft.xml", MetaFormat.Yft, true),
+    (".ymt.xml", MetaFormat.RSC, false),
 };
 
 int converted = 0, skipped = 0, failed = 0;
@@ -89,16 +101,65 @@ foreach (var (suffix, format, needsFolder) in conversions)
     }
 }
 
-var ymtPath = Path.Combine(xmlDir, modelName + ".ymt.xml");
-if (File.Exists(ymtPath))
-{
-    Console.Error.WriteLine(
-        $"[SKIP] {ymtPath}: .ymt conversion not implemented yet -- " +
-        "scripts/ymt_builder.py's schema does not match the real CPedVariationInfo " +
-        "PSO struct (see docs/architecture-decisions.md point 10). Not converting " +
-        "to avoid producing a corrupt .ymt.");
-    skipped++;
-}
-
 Console.WriteLine($"Done: {converted} converted, {skipped} skipped, {failed} failed.");
 return failed > 0 ? 1 : 0;
+
+// Round-trip sanity check: loads a produced binary back through CodeWalker's
+// own reader and reports the PSO/Meta structure blocks it recognizes. Used
+// to verify scripts/ymt_builder.py's output is actually well-formed (not
+// just "didn't throw during conversion") -- see docs/architecture-decisions.md
+// point 11. Currently only .ymt (Meta/PSO-based) is meaningfully inspectable
+// this way; .ydd/.yft/.ytd are RSC drawable/texture dictionaries with a
+// different internal layout.
+static int RunInspect(string[] args)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("Usage: codewalker-cli inspect <binary_file>");
+        return 2;
+    }
+    var path = args[1];
+    if (!File.Exists(path))
+    {
+        Console.Error.WriteLine($"File not found: {path}");
+        return 1;
+    }
+
+    var bytes = File.ReadAllBytes(path);
+    Console.WriteLine($"Loaded {bytes.Length} bytes from {path}");
+
+    try
+    {
+        var ymt = new YmtFile();
+        ymt.Load(bytes);
+
+        Console.WriteLine($"Meta != null: {ymt.Meta != null}");
+        if (ymt.Meta?.DataBlocks != null)
+        {
+            Console.WriteLine($"DataBlocks.Count = {ymt.Meta.DataBlocks.Count}");
+            for (int i = 0; i < ymt.Meta.DataBlocks.Count; i++)
+            {
+                var block = ymt.Meta.DataBlocks[i];
+                Console.WriteLine($"  Block[{i}]: StructureNameHash={block.StructureNameHash}, DataLength={block.Data?.Length ?? 0}");
+            }
+            if (ymt.Meta.DataBlocks.Count == 0)
+            {
+                Console.Error.WriteLine("[WARN] No data blocks found -- file may be empty/malformed.");
+                return 1;
+            }
+        }
+        else
+        {
+            Console.Error.WriteLine("[FAIL] Meta or Meta.DataBlocks is null -- not a valid PSO/Meta (RSC) file.");
+            return 1;
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[FAIL] {ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
+
+    Console.WriteLine("OK: round-trip load succeeded, structure blocks recognized.");
+    return 0;
+}
