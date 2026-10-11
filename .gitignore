@@ -1,4 +1,5 @@
 .venv/
+.venv-local3d/
 __pycache__/
 *.pyc
 .env
@@ -6,3 +7,13 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+workspace/
+
+# .NET / CodeWalker CLI build artifacts (not vendored/committed, see
+# docs/architecture-decisions.md point 10 and scripts/fetch_codewalker.sh)
+third_party/
+tools/CodeWalkerCli/bin/
+tools/CodeWalkerCli/obj/
+tools/CodeWalkerCli/publish/
+*.dll
+*.pdb

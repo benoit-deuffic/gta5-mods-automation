@@ -88,6 +88,44 @@ Suite à `docs/analyse-prerequis.md`. Décisions validées avec l'utilisateur le
    explicite (`TripoInsufficientCreditsError`) plutôt que de basculer en mock
    silencieusement — pour ne jamais masquer un vrai problème de configuration.
 
+10. **CodeWalker.Core compile et fonctionne RÉELLEMENT sous Linux (découverte
+    du 2026-10-11)** — contredit l'hypothèse prudente du skill ("non prouvé").
+    Vérifié de bout en bout :
+    - `dotnet build CodeWalker.Core.csproj` (.NET 8 SDK) réussit sans erreur
+      sur Linux (netstandard2.0, dépendances SharpDX/SharpDX.Mathematics
+      purement managées, aucun appel natif Windows nécessaire pour la
+      conversion XML→binaire).
+    - Un CLI dédié (`tools/CodeWalkerCli/`, `codewalker-cli convert --in
+      <xml_dir> --out <out_dir> --name <model_name>`) a été écrit, compilé en
+      exécutable autonome Linux (`dotnet publish -r linux-x64
+      --self-contained true`), et testé réellement : conversion de
+      `.ytd.xml`/`.ydd.xml`/`.yft.xml` minimaux en vrais binaires RAGE (57,
+      66, 71 octets respectivement) via `XmlMeta.GetYtdData/GetYddData/
+      GetYftData`. Intégré et validé via `scripts/codewalker_convert.py`
+      (`CODEWALKER_CLI_PATH`) et testé en bout en bout (`tests/
+      test_codewalker_cli_integration.py`, skip propre si le CLI n'est pas
+      construit).
+    - CodeWalker n'a pas de fichier de licence explicite sur son dépôt → son
+      code source n'est PAS vendorisé/committé ici, seulement cloné à la
+      demande dans `third_party/CodeWalker` (gitignored) via
+      `scripts/fetch_codewalker.sh`, même principe que pour les assets
+      Rockstar (ne jamais embarquer ce qu'on ne possède pas).
+    - **Découverte corrélée et importante** : en testant la conversion avec
+      notre propre `.ymt` généré par `scripts/ymt_builder.py`, comparaison
+      avec le vrai struct `CPedVariationInfo` dans
+      `CodeWalker.Core/GameFiles/MetaTypes/MetaTypes.cs` (ligne ~5986) révèle
+      que notre schéma généré est **incorrect** : champs réels manquants
+      (`bHasTexVariations`, `bHasDrawblVariations`, `bHasLowLODs`,
+      `bIsSuperLOD` en préambule du struct), mauvais niveau d'imbrication pour
+      `aComponentData3`/`aDrawblData3` (structures `CPVComponentData` /
+      `CPVDrawblData` / `CPVTextureData` / `CComponentInfo` / `CPedPropInfo`
+      bien réelles mais mal reproduites), champs inventés sans existence
+      réelle (`pedXml_availTexs`, `aValidCompDrawbl`, `propMask` au mauvais
+      niveau). **Conséquence : `scripts/ymt_builder.py` doit être réécrit
+      avant tout usage réel** — le CLI `codewalker-cli` refuse volontairement
+      de convertir un `.ymt.xml` (`[SKIP]` explicite) plutôt que de produire
+      un binaire corrompu silencieusement. Tâche de suivi ajoutée au plan.
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).

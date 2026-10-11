@@ -16,22 +16,52 @@ Corrections applied vs. the original spec script (docs/analyse-prerequis.md §2.
 6. Native Sollumz binary export (pymateria) is Windows-only; on Linux this
    script produces CodeWalker XML (.ydd.xml/.yft.xml/.ytd.xml) that must be
    converted to binary separately (scripts/codewalker_convert.py).
+7. Accepts both FBX (Meshy) and GLB/glTF (Tripo3D) source meshes, picked by
+   file extension -- Tripo3D's text-to-model output is a single GLB with
+   embedded PBR textures, no separate texture files (see
+   mcp_server/tripo_client.py). UNTESTED against a real GLB: this sandbox has
+   no Blender to run it against; verify on the GPU workstation before relying
+   on it (docs/architecture-decisions.md point 9).
 """
 import sys
 import argparse
+import os
 import bpy
+
+IMPORTABLE_EXTENSIONS = {".fbx", ".glb", ".gltf"}
 
 
 def parse_args():
     raw_args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser(description="Headless GTA V Rig & Weight Transfer")
     parser.add_argument("--template", required=True, help="Path to base ped template .blend")
-    parser.add_argument("--source-fbx", required=True, help="Path to input raw FBX from Meshy")
+    parser.add_argument("--source-fbx", "--source-mesh", dest="source_mesh", required=True,
+                         help="Path to input raw mesh from the 3D backend: .fbx (Meshy) or .glb/.gltf (Tripo3D)")
     parser.add_argument("--output-dir", required=True, help="Destination folder for exported assets")
     parser.add_argument("--model-name", required=True, help="Model identifier")
     parser.add_argument("--vert-mapping", default="POLYINTERP_VNORPROJ")
     parser.add_argument("--max-influences", type=int, default=4)
     return parser.parse_args(raw_args)
+
+
+def import_source_mesh(path: str):
+    """Import the raw AI-generated mesh regardless of which backend produced
+    it. Returns the list of objects selected by the import operator (same
+    contract for both branches, so the caller doesn't need to know which
+    backend was used).
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in IMPORTABLE_EXTENSIONS:
+        raise RuntimeError(f"Unsupported source mesh extension {ext!r} for {path} "
+                            f"(expected one of {sorted(IMPORTABLE_EXTENSIONS)}).")
+    if ext == ".fbx":
+        bpy.ops.import_scene.fbx(filepath=path, use_anim=False)
+    else:
+        # Tripo3D GLB: PBR textures are embedded, Blender's glTF importer
+        # unpacks them into image datablocks automatically -- no separate
+        # texture files to feed the validator/manifest step for this path.
+        bpy.ops.import_scene.gltf(filepath=path)
+    return bpy.context.selected_objects
 
 
 def find_reference_mesh(candidates):
@@ -80,11 +110,10 @@ def main():
     if not reference_armature or not reference_mesh:
         raise RuntimeError("Template file lacks expected Armature or Base Mesh objects.")
 
-    bpy.ops.import_scene.fbx(filepath=args.source_fbx, use_anim=False)
-    imported_objects = bpy.context.selected_objects
+    imported_objects = import_source_mesh(args.source_mesh)
     target_mesh = next((obj for obj in imported_objects if obj.type == 'MESH'), None)
     if not target_mesh:
-        raise RuntimeError("No valid mesh geometry found in imported FBX.")
+        raise RuntimeError(f"No valid mesh geometry found in imported {args.source_mesh}.")
 
     bpy.context.view_layer.objects.active = target_mesh
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)

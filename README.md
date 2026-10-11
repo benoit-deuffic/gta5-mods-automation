@@ -92,6 +92,26 @@ scripts/bootstrap_ollama.sh --dry-run  # affiche le plan sans rien installer
 Le script écrit `config/ollama.json` (endpoint + modèle choisi), lu automatiquement
 par `mcp_server/prompt_refiner.py`.
 
+## Conversion XML → binaire RAGE (CodeWalker.Core) — fonctionne sous Linux
+
+Contrairement à l'hypothèse prudente initiale, `CodeWalker.Core` compile et
+s'exécute réellement sous Linux (.NET 8), vérifié de bout en bout (voir
+`tools/CodeWalkerCli/README.md` et `docs/architecture-decisions.md` point 10) :
+
+```bash
+scripts/fetch_codewalker.sh
+dotnet publish tools/CodeWalkerCli -c Release -r linux-x64 \
+  --self-contained true -p:PublishSingleFile=true -o tools/CodeWalkerCli/publish
+export CODEWALKER_CLI_PATH="$(pwd)/tools/CodeWalkerCli/publish/codewalker-cli"
+```
+
+Convertit réellement `.ytd.xml`/`.ydd.xml`/`.yft.xml` en binaires RAGE.
+**`.ymt.xml` n'est pas encore converti** : le schéma généré par
+`scripts/ymt_builder.py` ne correspond pas à la vraie structure
+`CPedVariationInfo` (découvert en comparant au code source CodeWalker) — à
+corriger avant tout usage réel, voir le détail dans
+`docs/architecture-decisions.md` point 10.
+
 ## Pré-requis pour un run réel (non-mock)
 
 Voir `docs/analyse-prerequis.md` §1 et `templates/README.md` :

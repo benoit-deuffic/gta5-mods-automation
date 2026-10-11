@@ -42,6 +42,12 @@ def is_blender_available() -> bool:
 
 def compile_ped(template_path: Path, source_fbx: Path, output_dir: Path, model_name: str,
                  timeout_s: int = 300) -> CompileResult:
+    """Run Blender headless on a source mesh from ANY configured backend.
+
+    `source_fbx` is a historical name kept for API stability; it accepts
+    both .fbx (Meshy) and .glb/.gltf (Tripo3D) -- scripts/blender_rig_export.py
+    picks the right importer by extension (see its import_source_mesh()).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     blender_path = _resolve_blender_path()
 
