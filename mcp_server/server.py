@@ -31,12 +31,27 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "pipeline.json
 _CONFIG = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
 
 
+def _normalize_target_name(target_name: str) -> str:
+    """GTA V/Sollumz convention: asset filenames are always lowercase --
+    confirmed for real on bora (2026-10-11): sollumz.export_assets silently
+    lowercases its output filename regardless of the Blender object name
+    passed in (exporting an armature named "TestPed01" produced
+    "testped01.yft.xml" on disk). If target_name isn't normalized at every
+    entry point, scripts/codewalker_convert.py's `{model_name}.*` glob looks
+    for the wrong case and silently finds nothing (missing files are treated
+    as "that component wasn't produced", not an error) -- a silent pipeline
+    failure, not a loud one. Normalizing once here, at every tool's first
+    line, keeps staging/compiled/export/manifest paths consistent.
+    """
+    return target_name.lower()
+
+
 def _staging_dir(target_name: str) -> Path:
-    return WORKSPACE_DIR / target_name / "staging"
+    return WORKSPACE_DIR / _normalize_target_name(target_name) / "staging"
 
 
 def _compiled_dir(target_name: str) -> Path:
-    return WORKSPACE_DIR / target_name / "compiled"
+    return WORKSPACE_DIR / _normalize_target_name(target_name) / "compiled"
 
 
 def _manifest_path() -> Path:
@@ -53,7 +68,7 @@ def refine_prompt_with_ollama(raw_prompt: str, target_name: str) -> dict:
     """
     result = prompt_refiner.refine_prompt(raw_prompt)
     return {
-        "target_name": target_name,
+        "target_name": _normalize_target_name(target_name),
         "original_prompt": result.original_prompt,
         "refined_prompt": result.refined_prompt,
         "mock": result.mock,
@@ -71,6 +86,7 @@ def generate_raw_3d_asset(prompt: str, target_name: str, art_style: str = "reali
     Meshy 6+, see docs/analyse-prerequis.md §2.5). Runs in mock mode
     automatically when no backend credentials/tooling are available.
     """
+    target_name = _normalize_target_name(target_name)
     staging_dir = _staging_dir(target_name)
     backend_name = os.environ.get("TEXT3D_BACKEND", "meshy").lower()
     if backend_name == "meshy":
@@ -125,6 +141,7 @@ def compile_gtav_ped(target_name: str, fbx_path: str, gender: str = "female") ->
     template aren't installed on this machine (see docs/architecture-decisions.md
     point 6 and templates/README.md).
     """
+    target_name = _normalize_target_name(target_name)
     blender_cfg = _CONFIG.get("blender", {})
     template_key = "template_female_path" if gender == "female" else "template_male_path"
     template_path = Path(blender_cfg.get(template_key, f"templates/template_{gender}.blend"))
@@ -165,6 +182,7 @@ def sync_usermods_manifest(target_name: str, ped_type: str = "CIVFEMALE", gender
     produces the manifest/ymt in the workspace for build_delivery_package to
     bundle into the install zip.
     """
+    target_name = _normalize_target_name(target_name)
     compiled_dir = _compiled_dir(target_name)
     manifest_path = _manifest_path()
 
@@ -195,6 +213,7 @@ def build_delivery_package(target_name: str) -> dict:
     (AddonPeds/PedSelector layout + standalone dlcpack layout), per
     docs/architecture-decisions.md points 2-3.
     """
+    target_name = _normalize_target_name(target_name)
     compiled_dir = _compiled_dir(target_name)
     manifest_path = _manifest_path()
     zip_path = package_builder.build_delivery_zip(

@@ -64,14 +64,51 @@ def import_source_mesh(path: str):
     return bpy.context.selected_objects
 
 
-def find_reference_mesh(candidates):
+def find_reference_armature(objects):
+    """Picks the GTA V skeleton armature from a real Sollumz-imported ped
+    template. Real Sollumz imports name the armature after the model file
+    (e.g. "a_f_y_business_02"), NOT "Armature"/"skel" as originally assumed
+    -- verified against a real a_f_y_business_02.yft/.ydd import on bora
+    (2026-10-11): produces an armature with 104 bones plus a couple of
+    smaller auxiliary armature objects. Picking by highest bone count is
+    robust regardless of naming convention.
+    """
+    armatures = [o for o in objects if o.type == 'ARMATURE']
+    if not armatures:
+        return None
+    return max(armatures, key=lambda o: len(o.data.bones))
+
+
+def find_reference_mesh(candidates, reference_armature=None):
+    """Picks the main skinned body mesh from a real ped template.
+
+    Real Sollumz-imported peds do NOT reliably name meshes "head"/"body"
+    (verified: a real import produced meshes named "SKEL_ROOT",
+    "SKEL_ROOT.001", "hash_XXXXXXXX.model", etc. -- hash-named when no name
+    table is loaded). The reliable signal is: a MESH object whose vertex
+    groups actually correspond to the reference armature's bones (i.e. it's
+    skinned), picking the one with the most vertices (the main body LOD,
+    not a prop/accessory).
+    """
+    bone_names = set(b.name for b in reference_armature.data.bones) if reference_armature else None
+    best = None
+    best_verts = -1
     for obj in candidates:
         if obj.type != 'MESH':
             continue
-        name = obj.name.lower()
-        if "head" in name or "body" in name:
-            return obj
-    return None
+        if bone_names is not None:
+            vgroup_names = set(g.name for g in obj.vertex_groups)
+            if not (vgroup_names & bone_names):
+                continue  # not skinned to this armature at all
+        else:
+            name = obj.name.lower()
+            if not ("head" in name or "body" in name):
+                continue
+        nverts = len(obj.data.vertices)
+        if nverts > best_verts:
+            best = obj
+            best_verts = nverts
+    return best
 
 
 def scale_to_reference_bbox(target_mesh, reference_mesh):
@@ -82,14 +119,15 @@ def scale_to_reference_bbox(target_mesh, reference_mesh):
     'no infinite polygon stretching'). This only corrects overall scale; pose
     alignment (T/A-pose) must come from Meshy's `pose_mode` parameter upstream.
     """
+    import mathutils
+
     def bbox_dims(obj):
-        corners = [obj.matrix_world @ v for v in [c for c in obj.bound_box]]
+        corners = [obj.matrix_world @ mathutils.Vector(c) for c in obj.bound_box]
         xs = [c[0] for c in corners]
         ys = [c[1] for c in corners]
         zs = [c[2] for c in corners]
         return max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
 
-    import mathutils
     tx, ty, tz = bbox_dims(target_mesh)
     rx, ry, rz = bbox_dims(reference_mesh)
     if min(tx, ty, tz) <= 1e-6:
@@ -105,8 +143,22 @@ def main():
     args = parse_args()
 
     bpy.ops.wm.open_mainfile(filepath=args.template)
-    reference_armature = bpy.data.objects.get("Armature") or bpy.data.objects.get("skel")
-    reference_mesh = find_reference_mesh(bpy.data.objects)
+
+    # Addon enablement lives in Blender's user preferences, not in the
+    # .blend file itself, so it never "sticks" across a fresh
+    # `blender --background --python ...` invocation even if it was enabled
+    # interactively before saving the template. Must be (re-)enabled here
+    # every run. Blender 4.2+ extension id; falls back to the pre-4.2
+    # legacy addon module name for older Blender/Sollumz combos.
+    for module in ("bl_ext.user_default.sollumz", "sollumz"):
+        try:
+            bpy.ops.preferences.addon_enable(module=module)
+            break
+        except Exception:
+            continue
+
+    reference_armature = find_reference_armature(bpy.data.objects)
+    reference_mesh = find_reference_mesh(bpy.data.objects, reference_armature)
     if not reference_armature or not reference_mesh:
         raise RuntimeError("Template file lacks expected Armature or Base Mesh objects.")
 
@@ -151,6 +203,13 @@ def main():
     export_path = f"{args.output_dir}/{args.model_name}"
     addon_key = next((k for k in bpy.context.preferences.addons.keys() if "sollumz" in k.lower()), None)
     if addon_key:
+        # sollumz.export_assets names its output file(s) after the exported
+        # object(s), not after a filename parameter -- rename the armature
+        # (and therefore its drawable dictionary) to --model-name so the
+        # produced CWXML matches what scripts/codewalker_convert.py and
+        # scripts/package_builder.py expect to find.
+        reference_armature.name = args.model_name
+
         bpy.context.view_layer.objects.active = target_mesh
         for obj in bpy.data.objects:
             obj.select_set(obj in (target_mesh, reference_armature))

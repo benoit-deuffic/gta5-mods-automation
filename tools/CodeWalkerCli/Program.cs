@@ -22,6 +22,7 @@ if (args.Length == 0)
 {
     Console.Error.WriteLine("Usage: codewalker-cli convert --in <xml_dir> --out <out_dir> --name <model_name>");
     Console.Error.WriteLine("       codewalker-cli inspect <binary_file> [--type ymt|ydd|yft|ytd]");
+    Console.Error.WriteLine("       codewalker-cli export-xml --in <binary_file> --out <out_dir>");
     return 2;
 }
 
@@ -30,10 +31,16 @@ if (args[0] == "inspect")
     return RunInspect(args);
 }
 
+if (args[0] == "export-xml")
+{
+    return RunExportXml(args);
+}
+
 if (args[0] != "convert")
 {
     Console.Error.WriteLine("Usage: codewalker-cli convert --in <xml_dir> --out <out_dir> --name <model_name>");
     Console.Error.WriteLine("       codewalker-cli inspect <binary_file> [--type ymt|ydd|yft|ytd]");
+    Console.Error.WriteLine("       codewalker-cli export-xml --in <binary_file> --out <out_dir>");
     return 2;
 }
 
@@ -162,4 +169,106 @@ static int RunInspect(string[] args)
 
     Console.WriteLine("OK: round-trip load succeeded, structure blocks recognized.");
     return 0;
+}
+
+// Converts a loose RPF-resource binary file (.ydd/.yft/.ytd/.ybn/.ycd/...,
+// the self-contained RSC7 format produced by CodeWalker/OpenIV export --
+// NOT a raw RPF archive) into CodeWalker-XML, the format Sollumz's import
+// operator also accepts (sollumz_operators.py ImportAssetsOperatorImpl
+// filter_glob includes "*.ydd.xml;*.yft.xml;*.ytd.xml;..."). This exists
+// because Sollumz's binary import path requires PyMateria, which is
+// Windows-only (see dependencies.py: `sys.platform == "win32"`) and is NOT
+// available on Linux/WSL2 -- going through XML sidesteps that requirement
+// entirely, since XML import uses Sollumz's own pure-Python/CWXML parser.
+static int RunExportXml(string[] args)
+{
+    string? inPath = null, outDir = null;
+    for (int i = 1; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--in": inPath = args[++i]; break;
+            case "--out": outDir = args[++i]; break;
+            default:
+                Console.Error.WriteLine($"Unknown argument: {args[i]}");
+                return 2;
+        }
+    }
+    if (inPath == null || outDir == null)
+    {
+        Console.Error.WriteLine("Usage: codewalker-cli export-xml --in <binary_file> --out <out_dir>");
+        return 2;
+    }
+    if (!File.Exists(inPath))
+    {
+        Console.Error.WriteLine($"File not found: {inPath}");
+        return 1;
+    }
+
+    Directory.CreateDirectory(outDir);
+    var bytes = File.ReadAllBytes(inPath);
+    var ext = Path.GetExtension(inPath).ToLowerInvariant();
+    var baseName = Path.GetFileName(inPath); // e.g. "a_f_y_business_02.yft" -- GameFile.Name
+                                              // isn't auto-populated by GetResourceFile<T>()
+                                              // (that only happens via RPF directory metadata,
+                                              // which loose/extracted files don't have), and
+                                              // MetaXml.GetXml()'s output filename is derived
+                                              // from it -- set it explicitly or every export
+                                              // lands in a file literally named ".xml".
+
+    try
+    {
+        string xml;
+        string filename;
+        switch (ext)
+        {
+            case ".ydd":
+            {
+                var f = RpfFile.GetResourceFile<YddFile>(bytes);
+                f.Name = baseName;
+                xml = MetaXml.GetXml(f, out filename, outDir);
+                break;
+            }
+            case ".yft":
+            {
+                var f = RpfFile.GetResourceFile<YftFile>(bytes);
+                f.Name = baseName;
+                xml = MetaXml.GetXml(f, out filename, outDir);
+                break;
+            }
+            case ".ytd":
+            {
+                var f = RpfFile.GetResourceFile<YtdFile>(bytes);
+                f.Name = baseName;
+                xml = MetaXml.GetXml(f, out filename, outDir);
+                break;
+            }
+            case ".ydr":
+            {
+                var f = RpfFile.GetResourceFile<YdrFile>(bytes);
+                f.Name = baseName;
+                xml = MetaXml.GetXml(f, out filename, outDir);
+                break;
+            }
+            default:
+                Console.Error.WriteLine($"[FAIL] Unsupported extension for export-xml: {ext} (supported: .ydd/.yft/.ytd/.ydr)");
+                return 1;
+        }
+
+        if (string.IsNullOrEmpty(xml))
+        {
+            Console.Error.WriteLine($"[FAIL] {inPath}: CodeWalker returned empty XML (file may be corrupt/unsupported variant).");
+            return 1;
+        }
+
+        var outPath = Path.Combine(outDir, filename);
+        File.WriteAllText(outPath, xml);
+        Console.WriteLine($"[OK] {inPath} -> {outPath} ({xml.Length} chars)");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[FAIL] {inPath}: {ex.GetType().Name}: {ex.Message}");
+        return 1;
+    }
 }

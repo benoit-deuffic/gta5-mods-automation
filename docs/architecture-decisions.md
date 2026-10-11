@@ -167,6 +167,72 @@ Suite à `docs/analyse-prerequis.md`. Décisions validées avec l'utilisateur le
       `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` sur ce WSL faute de libicu).
       55 tests passent (était 51).
 
+12. **Pipeline d'import réel validé bout en bout sur bora, Linux/WSL2
+    (2026-10-11)** — l'utilisateur a extrait `a_f_y_business_02` (le vrai ped
+    de base) via CodeWalker/OpenIV dans `peds/a_f_y_business_02/`
+    (`.ydd`/`.yft`/`.ymt`/`.ytd`/`.yed`/`.awc`, jamais commité — voir
+    `.gitignore`). Résultats :
+    - Blender 4.5.14 LTS installé **sans sudo** (tarball officiel extrait
+      dans `~/tools/`) + Sollumz v2.9.0 (release GitHub officielle, installée
+      via `blender -c extension install-file Sollumz.zip --repo user_default`)
+      + sa dépendance **réelle** `szio==1.3.0.dev9` (PAS `1.4.0.dev2` comme
+      indiqué précédemment dans le skill — corrigé après l'avoir installée à
+      la main avec la mauvaise version, ce qui masquait silencieusement la
+      bonne version installée par Sollumz lui-même dans son dossier
+      d'extension privé). Dépendances système additionnelles nécessaires même
+      en headless : `libsm6 libice6 libxext6 libxrender1 libxi6
+      libxkbcommon0 libgl1` (sudo, une fois).
+    - **Tous les opérateurs Sollumz confirmés réellement enregistrés**
+      (`sollumz.import_assets`, `sollumz.export_assets`, etc.) une fois
+      `szio` correctement résolu — validant la correction du point 7
+      (`sollumz.export_ped` n'existe pas).
+    - **Blocage réel découvert** : importer un binaire `.yft`/`.ydd` brut
+      extrait du jeu échoue avec *"Binary resource formats require PyMateria
+      which is not supported on this platform"* — `PyMateria` est une lib
+      Rockstar-licenciée **Windows uniquement**
+      (`dependencies.py: sys.platform == "win32"`). Aucune solution de
+      contournement côté Linux pour l'import binaire direct.
+    - **Solution adoptée** : CodeWalker.Core sait aussi faire le chemin
+      inverse de la conversion XML→binaire (point 10/11) : binaire→XML via
+      `MetaXml.GetXml(...)`. Ajout de la sous-commande `codewalker-cli
+      export-xml --in <binaire> --out <dossier>` (gère `.ydd/.yft/.ytd/.ydr`,
+      utilise `RpfFile.GetResourceFile<T>()` pour parser le format RSC7
+      autonome produit par CodeWalker/OpenIV, et doit fixer `file.Name`
+      manuellement — cette propriété n'est peuplée automatiquement que par
+      les métadonnées d'un répertoire RPF, absentes pour un fichier extrait
+      isolé). Sollumz accepte ensuite le `.xml` produit sans jamais toucher à
+      PyMateria. **Testé réellement** : `a_f_y_business_02.yft/.ydd/.ytd`
+      exportés en XML (+ 50 textures `.dds` dépaquetées) puis importés avec
+      succès dans Blender (`squelette` 104 os, meshes avec vertex groups
+      `SKEL_*` correctement rigués) — premier `templates/template_female_a_f_y_business_02.blend`
+      réel généré (non commité, voir `.gitignore`).
+    - `scripts/blender_rig_export.py` : 4 bugs supplémentaires trouvés et
+      corrigés en le faisant tourner pour de vrai contre ce template réel
+      (pas seulement contre `bpy` mocké comme précédemment) :
+      (a) `find_reference_mesh`/l'ancien lookup `Armature`/`skel` par nom
+      fixe ne correspondent à rien dans un vrai import Sollumz (l'armature
+      s'appelle `a_f_y_business_02`, les meshes `SKEL_ROOT`/`hash_XXXXXXXX`)
+      — remplacé par une détection structurelle (armature = le plus grand
+      nombre d'os ; mesh de référence = le mesh skinné sur cette armature
+      avec le plus de vertices) ;
+      (b) `obj.bound_box` retourne des `bpy_prop_array`, pas des `Vector` —
+      multiplication matricielle échouait ;
+      (c) l'addon Sollumz doit être réactivé explicitement à chaque
+      exécution headless (l'activation ne persiste pas dans le `.blend`) ;
+      (d) `sollumz.export_assets` nomme son fichier de sortie d'après le nom
+      de l'objet Blender exporté, pas d'après `--model-name` — renommage de
+      l'armature avant export.
+    - **Découverte supplémentaire, corrigée dans `mcp_server/server.py`** :
+      Sollumz met systématiquement le nom de fichier exporté en minuscules
+      (`TestPed01` → `testped01.yft.xml`). Sans normalisation, le lookup
+      `{model_name}.*` de `scripts/codewalker_convert.py` échoue
+      silencieusement (fichier manquant traité comme "composant non
+      produit", pas comme erreur). Ajout de `_normalize_target_name()`
+      appelé en première ligne de chaque outil MCP pour que `target_name`
+      soit en minuscules partout (staging, compiled, export Blender,
+      manifest).
+    - 55 tests toujours verts après ces corrections.
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).
