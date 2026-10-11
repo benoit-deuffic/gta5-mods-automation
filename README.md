@@ -122,3 +122,58 @@ Voir `docs/analyse-prerequis.md` §1 et `templates/README.md` :
 - Un CLI CodeWalker.Core pour la conversion XML -> binaire (`CODEWALKER_CLI_PATH`).
 - Sur le PC de jeu Windows : GTA V Legacy, ScriptHookV + SHVDN3, AddonPeds/
   PedSelector installé, Menyoo (critères d'acceptation manuels, voir spec §8.4).
+
+## Reskin de texture par IA locale (Blender + SDXL + ControlNet-depth)
+
+Génère une nouvelle apparence (vêtements/peau) sur un ped existant déjà rigué,
+sans régénérer la géométrie. Tourne entièrement en local (GPU requis), aucun
+viewport Blender interactif nécessaire (voir `docs/architecture-decisions.md`
+points 13-16 pour l'historique complet : pourquoi cette approche plutôt que
+Dream Textures, pourquoi ControlNet-depth plutôt que l'img2img simple, et le
+fix de rigging multi-composants).
+
+Prérequis une fois :
+- Blender 4.5+ avec Sollumz activé (voir ci-dessus).
+- Un venv Python séparé avec torch/diffusers/transformers (PAS le `.venv` du
+  projet, qui n'a pas besoin de GPU) : `~/tools/sd-local/venv` par convention,
+  modèle SDXL base déjà téléchargé localement.
+
+Commande directe (sans passer par le serveur MCP, utile pour itérer/déboguer) :
+
+```bash
+export PATH="$HOME/tools/blender-4.5.14-linux-x64:$PATH"   # adapter au chemin réel
+blender --background --python scripts/ai_texture_reskin.py -- \
+  --template templates/template_female_a_f_y_business_02.blend \
+  --output-dir workspace/<nom_du_ped>/reskin \
+  --model-name <nom_du_ped> \
+  --prompt "a dark leather jacket texture, studio lighting" \
+  --skin-prompt "natural human skin, photorealistic skin texture" \
+  --num-cameras 6 \
+  --texture-size 512 \
+  --controlnet-conditioning-scale 0.8 \
+  --steps 25 \
+  --sd-python ~/tools/sd-local/venv/bin/python
+```
+
+Ajouter `--skip-sd` pour tester uniquement la mécanique (caméras, rigging,
+partition de faces, bake UV) sans passer par SDXL — utile pour un test rapide
+(~1 s) avant de lancer un vrai run GPU (~1-2 min pour 6 caméras × plusieurs
+composants du corps).
+
+Produit un fichier `<nom_du_ped>_<composant>_reskin.png` par composant du
+corps détecté (ex. `uppr`, `lowr`, `head`, `hair` — un ped réel multi-
+composants en a généralement 3 à 5), plus un `<nom_du_ped>_reskin_manifest.json`
+qui détaille, par caméra et par composant : région classifiée (peau/vêtement),
+prompt effectivement utilisé, chemins des images intermédiaires.
+
+Via le serveur MCP (mêmes paramètres), outil `generate_ai_texture_reskin` —
+voir son docstring dans `mcp_server/server.py` pour le détail des retours
+(`status`, `mock`, `produced_files`, etc.) et `mcp_server/ai_reskin_runner.py`
+pour le repli mock quand Blender/le venv SD ne sont pas trouvés sur la machine.
+
+**Important** : la texture produite n'est encore qu'un aperçu — elle n'est PAS
+convertie automatiquement en `.ytd` binaire (étape manuelle via
+`scripts/dds_pack_and_validate.py`, voir son usage dans le fichier). Ceci est
+volontaire : voir `docs/architecture-decisions.md` point 13 sur le bug
+`codewalker-cli inspect` et pourquoi on ne convertit pas tant qu'une texture
+n'est pas validée visuellement.
