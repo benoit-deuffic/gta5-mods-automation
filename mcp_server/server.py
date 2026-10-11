@@ -174,13 +174,15 @@ def compile_gtav_ped(target_name: str, fbx_path: str, gender: str = "female") ->
 
 @mcp.tool()
 def generate_ai_texture_reskin(target_name: str, prompt: str, num_cameras: int = 6,
-                                texture_size: int = 512, strength: float = 0.85,
+                                texture_size: int = 512, controlnet_conditioning_scale: float = 0.8,
                                 steps: int = 25, gender: str = "female") -> dict:
     """Headless, multi-camera, UV-aware AI texture reskin for a GTA V ped
-    (scripts/ai_texture_reskin.py): renders N camera views of the ped
-    template mesh, synthesizes a new look per view with a local SDXL
-    img2img pass (scripts/sd_view_synthesis.py, run in the sd-local venv),
-    and bakes the results back onto the mesh's real diffuse UV layout.
+    (scripts/ai_texture_reskin.py): renders N true per-pixel depth-map
+    camera views of the ped template mesh, synthesizes a new look per view
+    with a local SDXL + ControlNet-depth pass (scripts/sd_view_synthesis.py,
+    run in the sd-local venv, text-to-image driven by the prompt and
+    structurally constrained by the depth map), and bakes the results back
+    onto the mesh's real diffuse UV layout.
 
     This is a reskin/visual-preview step, NOT a replacement for
     compile_gtav_ped -- it does not produce a new rigged mesh, only a
@@ -213,7 +215,7 @@ def generate_ai_texture_reskin(target_name: str, prompt: str, num_cameras: int =
         prompt=prompt,
         num_cameras=num_cameras,
         texture_size=texture_size,
-        strength=strength,
+        controlnet_conditioning_scale=controlnet_conditioning_scale,
         steps=steps,
         timeout_s=blender_cfg.get("timeout_seconds", 900),
     )

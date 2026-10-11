@@ -48,7 +48,8 @@ def is_pipeline_available() -> bool:
 
 
 def generate_reskin(template_path: Path, output_dir: Path, model_name: str, prompt: str,
-                     num_cameras: int = 6, texture_size: int = 512, strength: float = 0.85,
+                     num_cameras: int = 6, texture_size: int = 512,
+                     controlnet_conditioning_scale: float = 0.8,
                      steps: int = 25, timeout_s: int = 900) -> ReskinResult:
     output_dir.mkdir(parents=True, exist_ok=True)
     blender_path = _resolve_blender_path()
@@ -69,7 +70,7 @@ def generate_reskin(template_path: Path, output_dir: Path, model_name: str, prom
         "--prompt", prompt,
         "--num-cameras", str(num_cameras),
         "--texture-size", str(texture_size),
-        "--strength", str(strength),
+        "--controlnet-conditioning-scale", str(controlnet_conditioning_scale),
         "--steps", str(steps),
         "--sd-python", sd_python,
     ]

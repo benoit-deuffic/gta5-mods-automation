@@ -326,6 +326,92 @@ Suite à `docs/analyse-prerequis.md`. Décisions validées avec l'utilisateur le
       Blender/sd-local absents, réutilise le garde-fou mots-clés bloqués de
       `prompt_refiner` puisqu'il accepte aussi un prompt brut utilisateur).
 
+14. **Remplacement du guide plat + SDXL img2img par une vraie carte de
+    profondeur + ControlNet-depth SDXL (bora, 2026-10-11)** : suite à la
+    limitation documentée au point 13 ("ressemble à une armure stylisée, pas
+    à une veste"), remplacement complet des deux maillons faibles identifiés.
+    - **Vraie carte de profondeur Z par pixel, `render_guide_image()`
+      réécrite** (`scripts/ai_texture_reskin.py`) : `view_layer.use_pass_z =
+      True` + `scene.use_nodes = True` + graphe compositeur Render Layers ->
+      Map Range (bornes near/far dérivées de la distance caméra-centre de
+      bbox ± rayon, pas un Normalize générique qui écraserait le contraste
+      avec le sol/l'arrière-plan) -> File Output (PNG niveaux de gris) et ->
+      Composite. **Testé pour de vrai et inspecté visuellement** (pas
+      supposé fonctionner juste parce que Blender ne plante pas) : la sortie
+      montre un dégradé de gris net et cohérent (silhouette humanoïde
+      blanche/claire proche de la caméra s'assombrissant vers le fond noir,
+      visage/bras/torse avec variations de profondeur visibles) — une vraie
+      depth map, pas une approximation. **L'inquiétude de départ sur le
+      sous-pipeline compositeur en headless (abandonné précédemment "pour
+      une raison peu claire") ne s'est PAS confirmée** : `use_pass_z`, le
+      compositeur et les File Output nodes fonctionnent sans accroc en
+      `blender --background`, aucun hack de viewport/display nécessaire. Un
+      détail d'implémentation à noter : `CompositorNodeOutputFile` suffixe
+      toujours le nom de fichier avec le numéro de frame (`nom0001.png`),
+      même pour un seul still — code ajouté pour retrouver ce fichier et le
+      renommer vers le chemin exact attendu par l'appelant.
+    - **`scripts/sd_view_synthesis.py` réécrit : SDXL + ControlNet-depth, en
+      text-to-image, pas img2img** : `StableDiffusionXLControlNetPipeline`
+      avec `ControlNetModel.from_pretrained('diffusers/controlnet-depth-sdxl-1.0')`
+      (téléchargement à la volée, ~2.5 Go, pas de conflit de dépendances
+      avec le venv `~/tools/sd-local` déjà en place — diffusers 0.41.0 /
+      torch 2.11.0+cu128 chargent `ControlNetModel` et
+      `StableDiffusionXLControlNetPipeline` sans rien réinstaller). La depth
+      map pilote UNIQUEMENT la structure (`control_image`,
+      `controlnet_conditioning_scale=0.8` par défaut) ; le contenu/matière/
+      couleur vient entièrement du prompt texte — plus d'image de référence
+      à "modifier" comme en img2img, ce qui évite le compromis force
+      0.6 (no-op) vs 0.85 (contenu réel mais incohérent) du point 13.
+      Repli prévu mais non nécessaire cette session : `--backend sd2depth`
+      (`StableDiffusionDepth2ImgPipeline`, SD2.1, ~5 Go) si un vrai blocage
+      ControlNet-SDXL était rencontré — aucun blocage réel rencontré, donc
+      resté sur le chemin SDXL déjà prouvé comme demandé par la tâche.
+    - **VRAM** : RTX 5070 12 Go, ~11.7 Go libres mesurés avant le run.
+      Pipeline SDXL + ControlNet-depth chargés ensemble à 512×512 avec
+      attention slicing tiennent sans OOM ; `enable_model_cpu_offload()`
+      câblé en secours (catch `torch.cuda.OutOfMemoryError` avant ET pendant
+      l'inférence) mais jamais déclenché à cette résolution sur ce run.
+    - **Résultat visuel comparé honnêtement, image par image inspectée
+      directement** :
+      - Carte de profondeur (`testped_reskin_cam_ring_0_guide.png`) :
+        silhouette humanoïde nette en dégradé de gris, confirmée ci-dessus.
+      - Vue générée isolée (`cnet_view_ring0.png`, prompt "a dark leather
+        jacket texture, photorealistic fabric, studio lighting") :
+        **nette amélioration** — veste reconnaissable avec capuche,
+        fermeture éclair, manches, poignets, plis cohérents sur un buste
+        humain réel, plus aucune ressemblance avec une armure abstraite
+        comme au point 13. Limite trouvée : l'arrière-plan (profondeur
+        "lointaine" = noir) se fait remplir d'un motif de cuir répété en
+        mosaïque par ControlNet au lieu de rester neutre — pas masqué dans
+        cette passe.
+      - Texture finale accumulée (`testped_reskin.png`, 6 caméras bakées) :
+        amélioration réelle de la cohérence matière (plis, reflets gris/
+        métallisés cohérents sur torse et jambes) par rapport à l'ancien
+        résultat "armure" — mais **pas parfait, dit honnêtement** : coutures
+        visibles entre partitions de caméras (transitions abruptes de motif/
+        teinte, ex. mèches de cheveux doublées des deux côtés en haut), et
+        les caméras couvrant mains/visage reçoivent le même prompt "veste en
+        cuir" que le torse, produisant un motif cuir/métallique peu approprié
+        sur les mains (aspect squelette/armure localisé) faute de prompt
+        différencié par zone du corps — amélioration non implémentée cette
+        session (prompt unique pour toutes les caméras, comme avant).
+    - **Mécanisme caméras/partition/bake inchangé** : seul ce qui nourrit
+      `bake_camera_partition()` par caméra a changé (image ControlNet-depth
+      au lieu d'img2img sur guide plat) ; `partition_faces_to_cameras()`
+      et `bake_camera_partition()` eux-mêmes non modifiés.
+    - **Tests** : aucun test unitaire direct sur `ai_texture_reskin.py`
+      n'existe (nécessite bpy réel, hors scope du fast-suite) — seule la
+      frontière `mcp_server/ai_reskin_runner.py` est mockée dans
+      `tests/test_ai_reskin_runner.py`, inchangée dans son comportement
+      (le paramètre renommé `strength` -> `controlnet_conditioning_scale`
+      n'est pas exercé directement par ces tests). 62/62 tests toujours
+      verts après ces changements.
+    - **Limitations connues restantes** : pas de test d'occlusion réel
+      (hérité, voir point 13) ; prompt unique non différencié par zone du
+      corps (mains/visage/vêtement) ; artefact de mosaïque en arrière-plan
+      sur les vues générées ; pas de validation en jeu (pas de PC Windows
+      GTA V dans cette session).
+
 ## Corrections appliquées par rapport à la spec d'origine
 Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrigés dans le code :
 - Opérateur Sollumz : `sollumz.export_assets(...)`, pas `sollumz.export_ped` (inexistant).

@@ -4,7 +4,7 @@ ped mesh. Run via:
     blender --background --python scripts/ai_texture_reskin.py -- \\
         --template <template.blend> --output-dir <dir> --model-name <name> \\
         --prompt "<text>" [--num-cameras 6] [--texture-size 512] \\
-        [--sd-python ~/tools/sd-local/venv/bin/python] [--strength 0.85]
+        [--sd-python ~/tools/sd-local/venv/bin/python] [--controlnet-conditioning-scale 0.8]
 
 No interactive viewport is used anywhere (the thing that killed the earlier
 Dream Textures attempt -- see docs/architecture-decisions.md and the
@@ -20,12 +20,13 @@ Pipeline per run:
    scripts/blender_rig_export.find_reference_armature/find_reference_mesh).
 2. Place N cameras around the mesh's bounding box (azimuth ring + optional
    top/bottom), each looking at the bbox center.
-3. For each camera, render a flat/clay-shaded "guide" image (NOT a
-   true per-pixel Z-depth map -- see render_guide_image() docstring for why
-   and what was tried).
-4. Shell out to scripts/sd_view_synthesis.py (SDXL img2img, strength~0.85 --
-   see pitfall notes, lower strengths barely touch the input) to synthesize
-   a new view per camera from the guide image + prompt.
+3. For each camera, render a TRUE per-pixel Cycles Z-depth guide image
+   (compositor Render Layers -> Map Range -> File Output, see
+   render_guide_image() docstring).
+4. Shell out to scripts/sd_view_synthesis.py (SDXL + ControlNet-depth,
+   text-to-image conditioned on the depth map, prompt drives content/
+   material/color -- see sd_view_synthesis.py module docstring) to
+   synthesize a new view per camera from the depth guide image + prompt.
 5. Assign every mesh face to exactly ONE camera (the one most front-on to
    that face, via a normal/view-direction dot product) so bake passes never
    overlap/clobber each other -- this is the "masking" the task calls out as
@@ -79,11 +80,11 @@ def parse_args():
     p.add_argument("--render-size", type=int, default=512)
     p.add_argument("--sd-python", default=DEFAULT_SD_PYTHON)
     p.add_argument("--sd-script", default=DEFAULT_SD_SCRIPT)
-    p.add_argument("--strength", type=float, default=0.85,
-                   help="SDXL img2img strength. Validated this session: 0.6-0.75 on a flat "
-                        "guide image barely changes it (near-identity output); 0.85-0.9 "
-                        "produces real generative content while still respecting rough "
-                        "silhouette/shading structure.")
+    p.add_argument("--controlnet-conditioning-scale", type=float, default=0.8,
+                   help="SDXL ControlNet-depth conditioning strength (0=ignore depth map/pure "
+                        "prompt, 1=follow depth strictly). Supersedes the old --strength img2img "
+                        "parameter now that view synthesis is depth-conditioned text-to-image, "
+                        "not img2img on a flat guide.")
     p.add_argument("--steps", type=int, default=30)
     p.add_argument("--skip-sd", action="store_true",
                    help="Debug/test flag: skip the SD subprocess and bake the flat guide "
@@ -147,17 +148,34 @@ def _make_camera(scene, name, position, target, render_size):
     return cam_obj
 
 
-def render_guide_image(scene, camera, filepath, render_size):
-    """Renders a flat/clay-shaded guide image for this camera.
+def render_guide_image(scene, camera, filepath, render_size, near=None, far=None):
+    """Renders a TRUE per-pixel Cycles Z-depth map for this camera.
 
-    NOT a true per-pixel Z-depth map: an earlier attempt at a proper
-    Z-pass + compositor Normalize pipeline was dropped in favor of a single
-    flat grey material + a sun light + Cycles AO, because (a) it is far
-    simpler to get right headless with zero compositor-node wiring, and
-    (b) the task explicitly allows "a flat-shaded guide image" as the
-    conditioning input for the SDXL img2img fallback path. This is a
-    documented simplification, not a true depth-conditioned pipeline
-    (a real ControlNet-depth model would need an actual depth map).
+    Supersedes the earlier flat/clay-shaded "guide" approximation (kept the
+    old behaviour documented below for history -- see
+    docs/architecture-decisions.md point 13 and the follow-up point that
+    replaces it). This now:
+      1. enables the Z render pass on the view layer,
+      2. enables the compositor and wires Render Layers -> Map Range
+         (near/far clip derived from camera-to-mesh-bbox distance, so the
+         mesh's own depth range maps to the full 0..1 grayscale range
+         instead of a generic Normalize that can wash out contrast when the
+         background plane is included) -> Composite AND -> a File Output
+         node (so the PNG is written directly by the compositor, no need to
+         fish pixels out of 'Viewer Node' by hand),
+      3. renders and returns the resulting grayscale PNG path.
+
+    near/far are world-space distances from the camera along its view axis;
+    callers should pass (camera_to_bbox_center_distance - radius) and
+    (camera_to_bbox_center_distance + radius) so the whole mesh maps into
+    the visible grayscale range. If not given, falls back to a generic
+    0.1..100 range (works but with much lower contrast).
+
+    Confirmed headless-safe in practice this session: `scene.use_nodes`,
+    `use_pass_z`, and File Output nodes all work fine under
+    `blender --background` with Cycles CUDA, no viewport/display needed --
+    the earlier abandonment of this exact approach was not because it was
+    broken, it just wasn't tried through to completion.
     """
     scene.camera = camera
     scene.render.engine = 'CYCLES'
@@ -171,10 +189,68 @@ def render_guide_image(scene, camera, filepath, render_size):
         print(f"[WARN] Could not force GPU device for Cycles, using default: {exc}")
     scene.render.resolution_x = render_size
     scene.render.resolution_y = render_size
-    scene.render.image_settings.file_format = 'PNG'
-    scene.render.filepath = filepath
     scene.cycles.samples = 16
+
+    view_layer = scene.view_layers[0]
+    view_layer.use_pass_z = True
+    scene.use_nodes = True
+    tree = scene.node_tree
+    for n in list(tree.nodes):
+        tree.nodes.remove(n)
+
+    rl_node = tree.nodes.new("CompositorNodeRLayers")
+    rl_node.layer = view_layer.name
+
+    map_range = tree.nodes.new("CompositorNodeMapRange")
+    map_range.inputs["From Min"].default_value = near if near is not None else 0.1
+    map_range.inputs["From Max"].default_value = far if far is not None else 100.0
+    map_range.inputs["To Min"].default_value = 1.0  # near = white
+    map_range.inputs["To Max"].default_value = 0.0  # far = black
+    map_range.use_clamp = True
+
+    file_output = tree.nodes.new("CompositorNodeOutputFile")
+    out_dir = os.path.dirname(filepath)
+    out_base = os.path.splitext(os.path.basename(filepath))[0]
+    file_output.base_path = out_dir
+    file_output.file_slots[0].path = out_base
+    file_output.format.file_format = 'PNG'
+    file_output.format.color_mode = 'BW'
+
+    composite_node = tree.nodes.new("CompositorNodeComposite")
+
+    tree.links.new(rl_node.outputs["Depth"], map_range.inputs["Value"])
+    tree.links.new(map_range.outputs["Value"], file_output.inputs[0])
+    tree.links.new(map_range.outputs["Value"], composite_node.inputs["Image"])
+
+    scene.render.image_settings.file_format = 'PNG'
+    scene.render.filepath = os.path.join(out_dir, out_base + "_composite")
     bpy.ops.render.render(write_still=True)
+
+    # CompositorNodeOutputFile appends Blender's frame number to the
+    # filename (e.g. "name0001.png") even for a single still -- find and
+    # rename it to the exact path the caller asked for so downstream code
+    # doesn't need to guess the frame-numbered name.
+    produced = None
+    frame_suffixed = os.path.join(out_dir, f"{out_base}{scene.frame_current:04d}.png")
+    if os.path.exists(frame_suffixed):
+        produced = frame_suffixed
+    else:
+        for fname in os.listdir(out_dir):
+            if fname.startswith(out_base) and fname.endswith(".png") and fname != os.path.basename(filepath):
+                produced = os.path.join(out_dir, fname)
+                break
+    if produced and produced != filepath:
+        os.replace(produced, filepath)
+
+    # Clean up the auxiliary "_composite" still written via scene.render.filepath
+    # (the actual depth map we want comes from the File Output node above).
+    composite_still = scene.render.filepath + ".png"
+    if os.path.exists(composite_still):
+        try:
+            os.remove(composite_still)
+        except OSError:
+            pass
+
     return filepath
 
 
@@ -370,7 +446,10 @@ def main():
         if not faces:
             continue
         guide_path = os.path.join(args.output_dir, f"{args.model_name}_{cam.name}_guide.png")
-        render_guide_image(scene, cam, guide_path, args.render_size)
+        distance = (cam.location - center).length
+        near_clip = max(0.01, distance - radius * 1.5)
+        far_clip = distance + radius * 1.5
+        render_guide_image(scene, cam, guide_path, args.render_size, near=near_clip, far=far_clip)
 
         if args.skip_sd:
             view_path = guide_path
@@ -378,10 +457,10 @@ def main():
             view_path = os.path.join(args.output_dir, f"{args.model_name}_{cam.name}_view.png")
             cmd = [
                 args.sd_python, args.sd_script,
-                "--init-image", guide_path,
+                "--depth-image", guide_path,
                 "--prompt", args.prompt,
                 "--output", view_path,
-                "--strength", str(args.strength),
+                "--controlnet-conditioning-scale", str(args.controlnet_conditioning_scale),
                 "--steps", str(args.steps),
             ]
             print(f"[INFO] Running SD view synthesis for {cam.name}: {' '.join(cmd)}")
