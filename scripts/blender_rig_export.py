@@ -263,6 +263,52 @@ def scale_to_reference_bbox(target_mesh, reference_mesh):
     bpy.context.view_layer.update()
 
 
+def relink_external_textures(search_root: str) -> dict:
+    """Fixes a real bug found 2026-10-12 while rendering a layered MP
+    Freemode ped import: Sollumz's CodeWalker-XML import creates each Image
+    datablock with a RELATIVE path ("//name.dds", source='FILE') resolved
+    against the .blend file's own directory -- but the real .dds sits next
+    to the exported .ydd.xml, in a completely different directory tree, so
+    the relative path never resolves and the material renders as a flat
+    default color (NOT Blender's usual magenta/black "missing image"
+    checker -- it's subtler, a flat mid-grey/default Principled BSDF color,
+    easy to mistake for "the texture loaded but is just plain-colored").
+
+    NOTE this is NOT a DDS-codec problem: `img.has_data` stays False right
+    after `img.reload()` even once correctly relinked, because Blender
+    images are lazily decoded -- has_data only flips True once something
+    actually samples the pixels (e.g. during render). Don't use has_data as
+    a relink-success signal; the only real signal is the final render
+    itself, or forcing `img.pixels[0]` to trigger decode.
+
+    Walks `search_root` for every .dds file, builds an index by basename
+    (lowercase, no extension), then for every FILE-backed Image datablock
+    whose name matches an indexed .dds, overwrites its filepath with the
+    real absolute path and reloads it.
+
+    Returns {"relinked": [...names...], "not_found": [...names...]}.
+    """
+    dds_index = {}
+    for dirpath, _dirs, files in os.walk(search_root):
+        for fn in files:
+            if fn.lower().endswith(".dds"):
+                dds_index.setdefault(os.path.splitext(fn)[0].lower(), os.path.join(dirpath, fn))
+
+    relinked = []
+    not_found = []
+    for img in bpy.data.images:
+        if img.source != 'FILE':
+            continue
+        real_path = dds_index.get(img.name.lower())
+        if real_path is None:
+            not_found.append(img.name)
+            continue
+        img.filepath = real_path
+        img.reload()
+        relinked.append(img.name)
+    return {"relinked": relinked, "not_found": not_found}
+
+
 def main():
     args = parse_args()
 
