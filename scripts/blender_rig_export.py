@@ -309,6 +309,86 @@ def relink_external_textures(search_root: str) -> dict:
     return {"relinked": relinked, "not_found": not_found}
 
 
+def apply_generic_skin_textures(body_objects: dict, skin_textures_root: str,
+                                 ethnicity: str = "whi") -> dict:
+    """Swaps a nude body's OWN baked-in diffuse texture for the standard
+    per-ethnicity GTA skin texture (`mp_fm_skin_f_{up,lo}_{ethnicity}.dds`,
+    see the real files under `peds/<ped_name>/alt/skinTextures/`).
+
+    Added 2026-10-12 per the user's own decision: the nude body geometry
+    borrowed from a donor ped (e.g. the real "BeachGirl5"/"CatalinaNude"
+    asset tested against this project) is being adopted as a REUSABLE
+    generic nude base across different peds -- but reusability requires
+    decoupling the body SHAPE (the donor's mesh/rig) from a specific skin
+    TONE/identity (the donor's own bespoke diffuse texture, which only
+    exists for that one donor ped and doesn't follow the standard
+    ethnicity-variant convention). This function performs that decoupling:
+    swap the Image Texture to the standard mp_fm_skin_f_* file so the SAME
+    generic nude geometry can be re-skinned to any of the 6 standard
+    ethnicities (ara/bla/chi/lat/pak/whi) just by changing `ethnicity`,
+    exactly like a normal GTA ped's own variant system.
+
+    `body_objects` is `{"uppr": mesh_obj, "lowr": mesh_obj}` -- deliberately
+    explicit rather than guessed from object names, since donor object
+    names (e.g. "uppr_015_r.model") aren't a convention this function
+    should need to parse.
+
+    For each entry, finds every FILE-source Image used by that mesh's
+    materials and overwrites its filepath to point at
+    `skin_textures_root/mp_fm_skin_f_{code}_{ethnicity}.dds` (code is "up"
+    for uppr, "lo" for lowr -- the real naming used by the actual
+    skinTextures files), then reloads it.
+
+    Returns {"swapped": [(component, image_name, new_path), ...],
+    "not_found": [component, ...]} for the caller to log/verify -- a
+    component ends up in "not_found" if the expected skinTextures file
+    doesn't exist on disk (e.g. an unsupported ethnicity code), in which
+    case that mesh's texture is left untouched rather than broken.
+    """
+    code_by_component = {"uppr": "up", "lowr": "lo"}
+    swapped = []
+    not_found = []
+    for component, mesh_obj in body_objects.items():
+        code = code_by_component.get(component)
+        if code is None:
+            not_found.append(component)
+            continue
+        target_path = os.path.join(skin_textures_root, f"mp_fm_skin_f_{code}_{ethnicity}.dds")
+        if not os.path.isfile(target_path):
+            not_found.append(component)
+            continue
+        images = set()
+        for slot in mesh_obj.material_slots:
+            if slot.material is None or not slot.material.use_nodes:
+                continue
+            for node in slot.material.node_tree.nodes:
+                # Only the node feeding Base Color is the diffuse/skin-tone
+                # texture -- PITFALL found 2026-10-12: an earlier version of
+                # this function swapped EVERY FILE-source Image Texture node
+                # (base color AND normal map AND specular map) to the SAME
+                # plain diffuse skin file. A flat-color image interpreted as
+                # a normal map (through the node graph's RGB Curves -> bump
+                # conversion) produces visible dark blotchy/noise artifacts
+                # on the skin -- confirmed by a real render, root-caused by
+                # inspecting the material node graph (Sollumz names this
+                # node "DiffuseSampler", vs "BumpSampler"/"SpecSampler" for
+                # the other maps, each feeding a DIFFERENT Principled BSDF
+                # input -- Base Color only for DiffuseSampler).
+                if node.type != 'TEX_IMAGE' or node.image is None or node.image.source != 'FILE':
+                    continue
+                feeds_base_color = any(
+                    link.to_node.type == 'BSDF_PRINCIPLED' and link.to_socket.name == 'Base Color'
+                    for link in slot.material.node_tree.links if link.from_node == node
+                )
+                if feeds_base_color:
+                    images.add(node.image)
+        for img in images:
+            img.filepath = target_path
+            img.reload()
+            swapped.append((component, img.name, target_path))
+    return {"swapped": swapped, "not_found": not_found}
+
+
 def main():
     args = parse_args()
 

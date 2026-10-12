@@ -958,3 +958,30 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       bien à `hide_render=True`, rendu final sans dédoublement visible (confirmé par rendu réel).
       104/104 tests toujours verts (aucun test cassé, comportement d'orchestration mocké existant
       inchangé).
+
+25. **"NudeGeneric" : le donneur BeachGirl5 devient un corps nu réutilisable, découplé de sa
+    propre texture de peau (2026-10-12)** : sur décision utilisateur explicite, le corps emprunté
+    à BeachGirl5 n'est plus traité comme un donneur ponctuel pour CE ped, mais comme LE corps nu
+    générique du projet, réutilisable sur n'importe quel ped MP Freemode féminin — ce qui impose
+    de découpler la FORME (le mesh/rig du donneur) de son IDENTITÉ de peau propre (sa texture
+    diffuse figée), pour pouvoir la reteinter avec n'importe quelle ethnicité standard.
+    - `scripts/blender_rig_export.py` gagne `apply_generic_skin_textures(body_objects,
+      skin_textures_root, ethnicity="whi")` : remplace la texture diffuse d'un mesh `uppr`/`lowr`
+      par le fichier standard `mp_fm_skin_f_{up,lo}_{ethnicity}.dds` (les 12 fichiers réels de
+      `alt/skinTextures/`, un par ethnicité ara/bla/chi/lat/pak/whi).
+    - **Piège trouvé et corrigé en cours de route** : la première implémentation remplaçait TOUTE
+      image à source fichier trouvée sur le mesh — pas seulement la texture diffuse, mais AUSSI
+      la normal map et la specular map, qui recevaient alors la même image diffuse plate. Une
+      image couleur interprétée comme une normal map (via le graphe de nœuds RGB Curves → bump du
+      matériau) produit un bruit sombre/tacheté visible sur la peau — confirmé par un rendu réel
+      avant/après. Root cause trouvée en inspectant le graphe de nœuds du matériau réel : Sollumz
+      nomme le nœud diffus `DiffuseSampler` (branché sur `Base Color` du Principled BSDF),
+      distinct de `BumpSampler`/`SpecSampler`. Fix : ne cibler QUE le nœud dont la sortie Color
+      est branchée sur l'entrée `Base Color` d'un `BSDF_PRINCIPLED`, laisser les autres intacts.
+    - `scripts/import_layered_ped.py` gagne `--generic-skin-root` + `--generic-skin-ethnicity`
+      (défaut `whi`), appliqués aux meshes réellement résolus `uppr`/`lowr` de CE build (suivi
+      composant→objets ajouté à la boucle d'import, pas deviné depuis le nom de l'objet).
+    - **Vérifié pour de vrai** : rebuild complet avec `--generic-skin-root /tmp/skintex_xml` →
+      `generic skin swapped for: ['uppr', 'lowr']` (2 nœuds, un par composant, pas 6 comme avant
+      le fix), rendu final confirmé : peau lisse et de tonalité normale sur bras/jambes, plus de
+      bruit visible. 104/104 tests toujours verts.

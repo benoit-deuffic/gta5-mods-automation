@@ -69,13 +69,24 @@ def parse_args():
                               "(e.g. a separate skin-texture-only folder not nested under "
                               "--ped-root or --body-donor-root) -- each gets its own additive "
                               "relink_external_textures() pass")
+    parser.add_argument("--generic-skin-root", default=None,
+                         help="Optional: directory of standard per-ethnicity skin textures "
+                              "(mp_fm_skin_f_{up,lo}_{ethnicity}.dds) to swap onto the body "
+                              "donor's uppr/lowr, decoupling the borrowed body SHAPE from the "
+                              "donor's own bespoke skin TONE -- makes the donor reusable as a "
+                              "generic nude base. Requires --body-donor-root.")
+    parser.add_argument("--generic-skin-ethnicity", default="whi",
+                         help="Ethnicity code for --generic-skin-root (ara/bla/chi/lat/pak/whi, "
+                              "default: whi)")
     return parser.parse_args(raw_args)
 
 
 def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
                        body_donor_root: str | None = None,
                        body_donor_components: tuple[str, ...] = ("uppr", "lowr"),
-                       extra_texture_roots: tuple[str, ...] = ()) -> dict:
+                       extra_texture_roots: tuple[str, ...] = (),
+                       generic_skin_root: str | None = None,
+                       generic_skin_ethnicity: str = "whi") -> dict:
     """The bpy-dependent orchestration: resolve layers, import, rig, relink
     textures. Returns a stats dict for the caller to report/log. Split out
     from main() so a test can call it with a fake bpy and assert on the
@@ -115,12 +126,18 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
 
     before_objs = set(bpy.data.objects)
     failed_imports = []
+    new_meshes_by_component: dict[str, list] = {}
     for component, path in resolved.items():
+        before_this_import = set(bpy.data.objects)
         try:
             bpy.ops.sollumz.import_assets(directory=str(path.parent) + "/",
                                            files=[{"name": path.name}])
         except Exception as exc:
             failed_imports.append((component, str(exc)))
+            continue
+        new_meshes_by_component[component] = [
+            o for o in (set(bpy.data.objects) - before_this_import) if o.type == 'MESH'
+        ]
     stats["failed_imports"] = failed_imports
 
     new_meshes = [o for o in (set(bpy.data.objects) - before_objs) if o.type == 'MESH']
@@ -145,6 +162,25 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
         relink_result["not_found"] = [n for n in relink_result["not_found"] if n in pass_result["not_found"]]
     stats["textures_relinked"] = len(relink_result["relinked"])
     stats["textures_not_found"] = relink_result["not_found"]
+
+    if generic_skin_root:
+        # Decouples the body donor's borrowed SHAPE from its own bespoke
+        # skin TONE -- see blender_rig_export.apply_generic_skin_textures()
+        # for the full rationale (makes the donor reusable as a generic
+        # nude base across different peds, not pinned to one donor's
+        # identity texture). Only meshes actually resolved to "uppr"/"lowr"
+        # for THIS build are eligible -- if the donor didn't win those
+        # codes (e.g. body_donor_root wasn't given), there's nothing to
+        # swap and this is silently a no-op.
+        body_objects = {}
+        for component in ("uppr", "lowr"):
+            meshes = new_meshes_by_component.get(component, [])
+            if meshes:
+                body_objects[component] = meshes[0]
+        skin_swap_result = bre.apply_generic_skin_textures(
+            body_objects, generic_skin_root, ethnicity=generic_skin_ethnicity)
+        stats["generic_skin_swapped"] = skin_swap_result["swapped"]
+        stats["generic_skin_not_found"] = skin_swap_result["not_found"]
 
     # Hide the template's own original body so only the new components show.
     #
@@ -248,7 +284,9 @@ def main():
     stats = build_layered_ped(args.template, args.ped_root, args.ped_name,
                                body_donor_root=args.body_donor_root,
                                body_donor_components=donor_components,
-                               extra_texture_roots=extra_roots)
+                               extra_texture_roots=extra_roots,
+                               generic_skin_root=args.generic_skin_root,
+                               generic_skin_ethnicity=args.generic_skin_ethnicity)
 
     print("[INFO] Resolved components:")
     for comp, path in stats.get("resolved_components", {}).items():
@@ -261,6 +299,10 @@ def main():
     if stats["textures_not_found"]:
         print(f"[WARN] {len(stats['textures_not_found'])} textures not found in the asset set: "
               f"{stats['textures_not_found']}")
+    if "generic_skin_swapped" in stats:
+        print(f"[INFO] generic skin swapped for: {[c for c, _, _ in stats['generic_skin_swapped']]}")
+        if stats["generic_skin_not_found"]:
+            print(f"[WARN] generic skin texture not found for: {stats['generic_skin_not_found']}")
     for component, err in stats["failed_imports"]:
         print(f"[FAIL] import of component '{component}' failed: {err}")
 
