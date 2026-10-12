@@ -3,7 +3,7 @@
 #
 # Purpose in this pipeline: Ollama provides a LOCAL LLM used to enrich/refine
 # the user's raw text prompt into a more detailed humanoid description before
-# it's sent to the 3D generation backend (Meshy or a local backend). It does
+# it's sent to the 3D generation backend (Tripo3D or a local backend). It does
 # NOT generate 3D geometry itself -- Ollama only serves text/vision LLMs.
 # See docs/architecture-decisions.md point 7.
 #

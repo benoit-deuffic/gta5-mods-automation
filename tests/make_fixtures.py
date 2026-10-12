@@ -1,4 +1,5 @@
-"""Generates tiny local mock fixtures used by MeshyClient in mock mode.
+"""Generates tiny local mock fixtures used by the text3d backends' mock mode
+(mcp_server/text3d_backend.py, mcp_server/tripo_client.py).
 
 Run once: `python tests/make_fixtures.py`. Produces:
 - tests/fixtures/mock_humanoid.fbx : a minimal valid ASCII FBX (empty mesh is

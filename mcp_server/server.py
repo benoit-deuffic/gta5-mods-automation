@@ -19,7 +19,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_server import ai_reskin_runner, blender_runner, meshy_client, prompt_refiner, validator
+from mcp_server import ai_reskin_runner, blender_runner, prompt_refiner, validator
 from mcp_server.text3d_backend import get_backend
 from scripts import codewalker_convert, package_builder, xml_manifest_updater, ymt_builder
 
@@ -78,24 +78,18 @@ def refine_prompt_with_ollama(raw_prompt: str, target_name: str) -> dict:
 
 @mcp.tool()
 def generate_raw_3d_asset(prompt: str, target_name: str, art_style: str = "realistic") -> dict:
-    """Submit a prompt to the configured text-3D backend (Meshy by default,
+    """Submit a prompt to the configured text-3D backend (Tripo3D by default,
     or a local backend via TEXT3D_BACKEND=local), poll until done, download
-    FBX + textures to a staging dir.
+    the generated mesh + textures to a staging dir.
 
-    `art_style` is accepted for spec compatibility but ignored (deprecated on
-    Meshy 6+, see docs/analyse-prerequis.md §2.5). Runs in mock mode
-    automatically when no backend credentials/tooling are available.
+    `art_style` is accepted for spec compatibility but ignored (not a
+    Tripo3D parameter). Runs in mock mode automatically when no backend
+    credentials/tooling are available.
     """
     target_name = _normalize_target_name(target_name)
     staging_dir = _staging_dir(target_name)
-    backend_name = os.environ.get("TEXT3D_BACKEND", "meshy").lower()
-    if backend_name == "meshy":
-        backend_kwargs = {
-            "base_url": _CONFIG.get("meshy", {}).get("api_base_url", "https://api.meshy.ai"),
-            "poll_interval_s": _CONFIG.get("meshy", {}).get("poll_interval_seconds", 5),
-            "poll_timeout_s": _CONFIG.get("meshy", {}).get("poll_timeout_seconds", 900),
-        }
-    elif backend_name == "tripo":
+    backend_name = os.environ.get("TEXT3D_BACKEND", "tripo").lower()
+    if backend_name == "tripo":
         backend_kwargs = {
             "base_url": _CONFIG.get("tripo", {}).get("api_base_url", "https://openapi.tripo3d.ai/v3"),
             "model_version": _CONFIG.get("tripo", {}).get("model_version", "v3.1-20260211"),
@@ -107,7 +101,7 @@ def generate_raw_3d_asset(prompt: str, target_name: str, art_style: str = "reali
     backend = get_backend(backend_name, **backend_kwargs)
     asset = asyncio.run(backend.generate_humanoid(
         prompt=prompt, target_name=target_name, staging_dir=staging_dir,
-        pose_mode=_CONFIG.get("meshy", {}).get("pose_mode", "a-pose"),
+        pose_mode=_CONFIG.get("tripo", {}).get("pose_mode", "a-pose"),
     ))
 
     fbx_report = validator.validate_fbx_file(

@@ -1,23 +1,26 @@
 # gtav-ai-pipeline
 
-Pipeline agentique Hermes : prompt texte -> Meshy (génération 3D) -> Blender
+Pipeline agentique Hermes : prompt texte -> Tripo3D (génération 3D) -> Blender
 headless + Sollumz (rigging/export) -> CodeWalker (conversion binaire RAGE)
 -> paquet d'installation (AddonPeds/PedSelector + dlcpack autonome) pour
 GTA V.
 
 Voir :
-- `gtav-ai-pipeline.spec` — spécification technique d'origine (copie verbatim).
+- `gtav-ai-pipeline.spec` — spécification technique d'origine (copie verbatim ;
+  mentionne encore Meshy, le backend 3D prévu initialement — voir
+  `docs/architecture-decisions.md` point 17 pour pourquoi ce choix a changé).
 - `docs/analyse-prerequis.md` — audit des écarts/erreurs de la spec vs réalité
-  des outils (Sollumz, CodeWalker, Meshy, Blender).
+  des outils (Sollumz, CodeWalker, Blender).
 - `docs/architecture-decisions.md` — décisions prises avec l'utilisateur
   (orchestrateur, cible de livraison, transport, ped de base, mode mock).
 
 ## État actuel
 
-Ce dépôt tourne en **mode mock complet** (pas de clé Meshy, pas de Blender ni
-CodeWalker installés sur cette machine) : toute la logique pure-Python
-(génération XML `ap_m.xml`, `.ymt`, packaging zip, validation) est réelle et
-testée ; les étapes qui nécessitent des outils externes absents produisent des
+Ce dépôt tourne en **mode mock complet** (pas de clé Tripo3D créditée, pas de
+Blender ni CodeWalker installés sur cette machine) : toute la logique
+pure-Python (génération XML `ap_m.xml`, `.ymt`, packaging zip, validation) est
+réelle et testée ; les étapes qui nécessitent des outils externes absents
+produisent des
 artefacts placeholder explicitement marqués `[MOCK]` plutôt que de fabriquer
 de faux binaires RAGE.
 
@@ -26,7 +29,7 @@ de faux binaires RAGE.
 ```bash
 uv venv --python 3.11 .venv
 uv pip install --python .venv -e . --group dev
-python tests/make_fixtures.py   # génère les fixtures mock Meshy
+python tests/make_fixtures.py   # génère les fixtures mock text3d_backend
 .venv/bin/pytest -v
 ```
 
@@ -54,8 +57,8 @@ mcp_servers:
    automatique sur le prompt original si Ollama indisponible. Garde-fou NSFW
    sur l'entrée et la sortie. **N'est pas un générateur 3D** (voir
    `docs/architecture-decisions.md` point 7).
-2. `generate_raw_3d_asset(prompt, target_name, art_style="realistic")` — Meshy
-   (ou mock, ou backend local si `TEXT3D_BACKEND=local`) -> FBX + textures
+2. `generate_raw_3d_asset(prompt, target_name, art_style="realistic")` — Tripo3D
+   (ou mock, ou backend local si `TEXT3D_BACKEND=local`) -> FBX/GLB + textures
    validés dans `workspace/<target_name>/staging/`.
 3. `compile_gtav_ped(target_name, fbx_path, gender="female")` — Blender headless
    (ou mock) -> `workspace/<target_name>/compiled/*.ydd.xml/.yft.xml/.ytd.xml`
@@ -66,17 +69,20 @@ mcp_servers:
    `dist/<target_name>_delivery.zip` (AddonPeds/PedSelector + dlcpack autonome,
    avec README_INSTALL.txt dans chaque dossier).
 
-## Génération 3D : Meshy, Tripo3D (cloud) ou local (futur poste GPU)
+## Génération 3D : Tripo3D (cloud, défaut) ou local (futur poste GPU)
 
-- Par défaut `TEXT3D_BACKEND=meshy` (ou mock si `MESHY_API_KEY` absent).
-- `TEXT3D_BACKEND=tripo` bascule sur Tripo3D (`mcp_server/tripo_client.py`),
+Meshy a été retiré du projet le 2026-10-12 (décision utilisateur, voir
+`docs/architecture-decisions.md` point 17) : Tripo3D est désormais le seul
+backend cloud et le backend par défaut.
+
+- Par défaut `TEXT3D_BACKEND=tripo` (ou mock si `TRIPO_API_KEY` absent),
   vérifié en direct contre l'API réelle le 2026-10-11 (authentification OK,
   mais nécessite des crédits sur le compte — voir
   `docs/architecture-decisions.md` point 9). Produit un GLB unique (textures
   embarquées), pas encore importé par `blender_rig_export.py` (FBX seulement).
 - `TEXT3D_BACKEND=local` bascule sur `mcp_server/text3d_backend.LocalText3DBackend`,
   pensé pour un poste avec GPU CUDA ≥8 Go VRAM (TripoSR / Hunyuan3D-2). Sur ce
-  sandbox (pas de GPU), ce backend tombe systématiquement en mock, comme Meshy.
+  sandbox (pas de GPU), ce backend tombe systématiquement en mock.
   `scripts/bootstrap_local_3d_env.sh <triposr|hunyuan3d-2>` prépare l'environnement
   Python sur le futur poste (non exécuté ici).
 
@@ -115,7 +121,7 @@ corriger avant tout usage réel, voir le détail dans
 ## Pré-requis pour un run réel (non-mock)
 
 Voir `docs/analyse-prerequis.md` §1 et `templates/README.md` :
-- `MESHY_API_KEY` (contenu SFW uniquement).
+- `TRIPO_API_KEY` (contenu SFW uniquement).
 - Blender 4.2+ avec l'extension Sollumz v2.9.0 activée.
 - `templates/template_female_a_f_y_business_02.blend` /
   `template_male_a_m_y_business_02.blend` extraits de ta propre copie du jeu.

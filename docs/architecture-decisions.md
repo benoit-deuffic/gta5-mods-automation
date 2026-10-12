@@ -665,3 +665,30 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
   (déprécié), validation de taille de fichier remplacée par une validation de format/dimensions.
 - `.ymt` (CPedVariationInfo) effectivement généré (absent de la spec d'origine).
 - `.yft` traité comme copie/renommage du fragment squelette du ped de base, pas reconstruit.
+
+17. **Retrait complet de Meshy du projet (2026-10-12)** : décision explicite de
+    l'utilisateur ("on nettoie du projet Meshy, je ne l'utiliserai pas").
+    Supprimés : `mcp_server/meshy_client.py`, `tests/test_meshy_client_mock.py`,
+    la classe `MeshyBackend` dans `text3d_backend.py`, le bloc `meshy` de
+    `config/pipeline.json`, `MESHY_API_KEY`/`MESHY_API_BASE_URL` de
+    `.env.example`. `GeneratedAsset`/`FIXTURES_DIR` (anciennement dans
+    `meshy_client.py`) déplacés vers un nouveau module neutre
+    `mcp_server/text3d_types.py` partagé par `tripo_client.py` et
+    `text3d_backend.py`. **Tripo3D (`TripoBackend`) devient le backend par
+    défaut** de `get_backend()` (`TEXT3D_BACKEND` non précisé == `tripo` au
+    lieu de `meshy`) ; `LocalText3DBackend` reste inchangé dans son
+    comportement observable (mock-fallback sur ce sandbox sans GPU), mais sa
+    logique de mock interne ne dépend plus de `MESHY_API_KEY` (bug latent
+    corrigé au passage : avant ce nettoyage, le backend local nécessitait
+    implicitement une clé Meshy pour sortir du mode mock, ce qui n'avait pas
+    de sens pour un backend auto-hébergé sans clé cloud). Le fichier
+    `gtav-ai-pipeline.spec` (copie verbatim de la spec d'origine, qui
+    mentionne Meshy comme choix initial) n'a volontairement PAS été modifié —
+    c'est un document historique figé, pas du code actif ; voir le README
+    pour le renvoi vers cette décision. `docs/analyse-prerequis.md` §1.2/§2.5
+    conservent leur analyse historique de la spec d'origine (comparaison avec
+    les endpoints Meshy réels, découverte au moment de l'analyse) avec une
+    note de contexte ajoutée, plutôt que d'être réécrits/supprimés. 70 tests
+    passent après ce nettoyage (était 74 ; 4 tests Meshy-spécifiques
+    supprimés avec `meshy_client.py`/`test_meshy_client_mock.py`, aucun autre
+    test perdu, aucune fonctionnalité Tripo3D affectée).

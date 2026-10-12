@@ -20,6 +20,8 @@ dépôt Sollumz v2.9.0, dépôt CodeWalker (CodeWalker.Core), pages AddonPeds / 
 
 ### 1.2 Secrets / comptes
 - `MESHY_API_KEY` : ABSENT. Coût indicatif par perso : preview ~20 crédits + refine ~10 + rigging ~5.
+  (Note 2026-10-12 : Meshy a été retiré du projet, voir `docs/architecture-decisions.md` point 17 ;
+  cette ligne documente l'analyse d'origine, le projet utilise désormais `TRIPO_API_KEY`.)
 - Clé LLM : inutile si Hermes orchestre via MCP (cf. §3, conflit avec le choix initial "orchestrateur Claude SDK maison").
 
 ### 1.3 Assets de référence (ne peuvent PAS être fournis par nous)
@@ -83,6 +85,10 @@ dépôt Sollumz v2.9.0, dépôt CodeWalker (CodeWalker.Core), pages AddonPeds / 
   de base, copié/renommé (le reconstruire dans Sollumz n'apporte rien et casse souvent la physique).
 
 ### 2.5 Meshy (§3, §5.3)
+_(Analyse historique de la spec d'origine, qui prévoyait Meshy comme backend 3D ;
+Meshy a été retiré du projet le 2026-10-12, voir `docs/architecture-decisions.md`
+point 17 — Tripo3D est désormais le seul backend cloud. Section conservée telle
+quelle pour l'historique de l'analyse.)
 - `MESHY_API_BASE_URL=https://api.meshy.ai/v2.0` est faux. Endpoints réels :
   `POST https://api.meshy.ai/openapi/v2/text-to-3d` (preview puis refine),
   `POST https://api.meshy.ai/openapi/v1/rigging`, polling `GET …/{id}`.

@@ -16,9 +16,9 @@ Corrections applied vs. the original spec script (docs/analyse-prerequis.md §2.
 6. Native Sollumz binary export (pymateria) is Windows-only; on Linux this
    script produces CodeWalker XML (.ydd.xml/.yft.xml/.ytd.xml) that must be
    converted to binary separately (scripts/codewalker_convert.py).
-7. Accepts both FBX (Meshy) and GLB/glTF (Tripo3D) source meshes, picked by
-   file extension -- Tripo3D's text-to-model output is a single GLB with
-   embedded PBR textures, no separate texture files (see
+7. Accepts both FBX (local backend) and GLB/glTF (Tripo3D) source meshes,
+   picked by file extension -- Tripo3D's text-to-model output is a single
+   GLB with embedded PBR textures, no separate texture files (see
    mcp_server/tripo_client.py). UNTESTED against a real GLB: this sandbox has
    no Blender to run it against; verify on the GPU workstation before relying
    on it (docs/architecture-decisions.md point 9).
@@ -240,7 +240,8 @@ def scale_to_reference_bbox(target_mesh, reference_mesh):
     Without this, meshes generated at an arbitrary scale/pose produce nonsense
     vertex weights when projected onto the GTA skeleton (acceptance criterion 4:
     'no infinite polygon stretching'). This only corrects overall scale; pose
-    alignment (T/A-pose) must come from Meshy's `pose_mode` parameter upstream.
+    alignment (T/A-pose) must come from the text3d_backend's `pose_mode`
+    parameter upstream.
     """
     import mathutils
 

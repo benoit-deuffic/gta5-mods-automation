@@ -1,17 +1,10 @@
 {
-  "meshy": {
-    "api_base_url": "https://api.meshy.ai",
-    "text_to_3d_endpoint": "/openapi/v2/text-to-3d",
-    "rigging_endpoint": "/openapi/v1/rigging",
-    "poll_interval_seconds": 5,
-    "poll_timeout_seconds": 900,
-    "pose_mode": "a-pose"
-  },
   "tripo": {
     "api_base_url": "https://openapi.tripo3d.ai/v3",
     "model_version": "v3.1-20260211",
     "poll_interval_seconds": 3,
     "poll_timeout_seconds": 300,
+    "pose_mode": "a-pose",
     "note": "output is a single GLB with embedded textures, no separate texture files; auto-rig via /animations/rig (rig_type=biped) not yet wired into this pipeline"
   },
   "blender": {

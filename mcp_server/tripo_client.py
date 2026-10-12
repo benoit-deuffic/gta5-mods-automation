@@ -1,5 +1,7 @@
-"""Asynchronous Tripo3D API client — a second text-to-3D backend alongside
-Meshy (see mcp_server/text3d_backend.py for the pluggable interface).
+"""Asynchronous Tripo3D API client — the default/sole cloud text-to-3D backend
+(Meshy was removed from this project 2026-10-12, see
+docs/architecture-decisions.md point 17). See mcp_server/text3d_backend.py
+for the pluggable Text3DBackend interface.
 
 Verified live against the real API on 2026-10-11 (see
 docs/architecture-decisions.md point 9):
@@ -20,8 +22,7 @@ Because insufficient credits is a *configured-but-broken* state (unlike "no
 key at all"), this client does NOT silently fall back to mock when the key
 is present — it raises TripoError with the API's own message (e.g.
 "Insufficient credits") so the failure is visible instead of masked. Mock
-mode only activates when TRIPO_API_KEY is absent, matching meshy_client's
-policy.
+mode only activates when TRIPO_API_KEY is absent.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from pathlib import Path
 
 import httpx
 
-from mcp_server.meshy_client import GeneratedAsset, FIXTURES_DIR
+from mcp_server.text3d_types import GeneratedAsset, FIXTURES_DIR
 
 DEFAULT_MODEL_VERSION = "v3.1-20260211"
 

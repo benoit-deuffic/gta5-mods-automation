@@ -33,4 +33,4 @@ d'écrasement entre plusieurs personnages générés.
 Tant que ces fichiers ne sont pas présents, le pipeline fonctionne en **mode mock** (voir
 `docs/architecture-decisions.md` point 6) : la compilation Blender est simulée et produit des
 artefacts placeholder clairement marqués comme tels, pour permettre de tester toute la chaîne
-(Meshy mock → Blender mock → manifeste → packaging) sans les outils réels.
+(Tripo3D mock → Blender mock → manifeste → packaging) sans les outils réels.

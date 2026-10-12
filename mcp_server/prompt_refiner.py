@@ -1,12 +1,13 @@
 """Local LLM prompt refinement via Ollama (replaces no 3D generation; see
-docs/architecture-decisions.md point 7 for why Ollama != a Meshy replacement).
+docs/architecture-decisions.md point 7 for why Ollama isn't a text3d_backend
+replacement).
 
 Takes the user's raw, possibly terse prompt and asks a local Ollama model to
-turn it into a detailed, SFW, Meshy-friendly humanoid description (clothing,
-build, pose cues) before it's handed to the 3D backend. Falls back to
-returning the original prompt unchanged (mock=True) when Ollama isn't
-reachable or the configured model isn't pulled -- it never blocks the
-pipeline on an optional enrichment step.
+turn it into a detailed, SFW, backend-agnostic humanoid description (clothing,
+build, pose cues) before it's handed to the configured text3d_backend (see
+mcp_server/text3d_backend.py). Falls back to returning the original prompt
+unchanged (mock=True) when Ollama isn't reachable or the configured model
+isn't pulled -- it never blocks the pipeline on an optional enrichment step.
 """
 from __future__ import annotations
 
@@ -32,11 +33,12 @@ _SYSTEM_PROMPT = (
 # general NSFW/nudity filter; user decision 2026-10-12: nudity/explicit
 # content is in-scope for the local SDXL reskin path, this guard exists only
 # to hard-block child-related and fetish content regardless of destination).
-# Still shared by both consumers: refine_prompt() (feeds Meshy, an external
-# third-party API with its OWN separate SFW-only ToS this guard does NOT
-# enforce -- Meshy may still reject/moderate nudity prompts on its own) and
-# generate_ai_texture_reskin's prompt/skin_prompt (feeds the local SDXL
-# pipeline only, see mcp_server/server.py).
+# Still shared by both consumers: refine_prompt() (feeds the configured
+# text3d_backend -- e.g. Tripo3D, an external third-party API with its OWN
+# separate SFW-only ToS this guard does NOT enforce -- the backend may still
+# reject/moderate nudity prompts on its own) and generate_ai_texture_reskin's
+# prompt/skin_prompt (feeds the local SDXL pipeline only, see
+# mcp_server/server.py).
 _BLOCKED_KEYWORDS = (
     "fetish", "underage", "minor",
 )
