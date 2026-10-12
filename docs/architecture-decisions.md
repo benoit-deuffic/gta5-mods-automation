@@ -820,3 +820,44 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
     un prompt en valeurs de curseurs" n'est PAS encore construite (prochaine étape évoquée mais
     pas commencée) — réutiliserait l'infrastructure Ollama/`prompt_refiner.py` existante avec un
     schéma de sortie JSON de curseurs plutôt qu'un texte enrichi. 97 tests passent après ce point.
+
+21. **Curseurs par-axe précis (poitrine/hanches) + bascule de référence vers peds/template_ped/
+    (2026-10-12)** : suite à la demande explicite d'une précision accrue sur poitrine/seins et
+    fesses, et à la décision de retirer `peds/a_f_y_business_02/` (jugé "figé comme modèle").
+    - **Clarifié avec l'utilisateur** : `templates/template_female_a_f_y_business_02.blend`
+      reste conservé comme fournisseur TECHNIQUE de squelette uniquement (pas "un modèle" au
+      sens produit) — seuls les assets source bruts `peds/a_f_y_business_02/` disparaissent.
+      Un nouveau template persistant `templates/template_mp_f_freemode_01_mp_f_bikerdlc_01.blend`
+      est construit via `scripts/import_layered_ped.py` (squelette emprunté à business_02,
+      composants réels de `peds/template_ped/mp_f_freemode_01_mp_f_bikerdlc_01/`) et devient la
+      référence pour les tests de morphologie désormais (10 composants importés/riggés, 26
+      textures reliées, 18 manquantes comme déjà documenté).
+    - **Découverte empirique importante** : les axes LOCAUX d'un os ne correspondent PAS de façon
+      cohérente à une direction MONDE (largeur/profondeur/hauteur) d'un os à l'autre — mesuré
+      réellement par mise à l'échelle isolée de chaque axe (X/Y/Z séparément, ×2) et lecture de
+      la bounding box MONDE résultante : sur `SPR_L/R_Breast`, axe local X→largeur monde, Y→
+      profondeur monde, Z→hauteur monde (séparation propre, aucun mélange) ; sur `SKEL_Pelvis`,
+      axe local Y→profondeur monde (comme pour le buste) MAIS axe local Z→LARGEUR monde (pas
+      hauteur) — chaque os a sa propre orientation locale, à ne jamais supposer identique.
+    - `MORPH_SLIDERS` restructuré : chaque entrée est désormais `{bone_name: (masque_x, masque_y,
+      masque_z)}` au lieu d'un simple tuple d'os (échelle uniforme). Nouveaux curseurs précis et
+      isolés : `bust_width`, `bust_projection`, `bust_size` (3 axes indépendants de
+      `SPR_L/R_Breast`, remplace l'ancien `bust_size` uniforme) et `hip_width`, `hip_depth`
+      (2 axes de `SKEL_Pelvis`, remplace l'ancien `waist_width` uniforme).
+    - **Limite confirmée et assumée, non résolue** : aucun os dédié aux fesses/fessiers n'existe
+      dans ce squelette (seule la poitrine a des os "soft prop" dédiés, `SPR_L/R_Breast`) —
+      `hip_width`/`hip_depth` via `SKEL_Pelvis` est le meilleur levier disponible mais n'isole PAS
+      les fesses seules : il déplace aussi l'attache des cuisses et la largeur générale de
+      hanche/taille (SKEL_Pelvis est parent de SKEL_L/R_Thigh). Un contrôle vraiment isolé des
+      fesses nécessiterait un système de déformation régional par groupe de sommets (ex.
+      Lattice limité à une sélection géométrique) plutôt qu'un levier d'os — chantier de
+      modélisation distinct, pas entamé.
+    - **Vérifié pour de vrai** contre `templates/template_mp_f_freemode_01_mp_f_bikerdlc_01.blend`
+      (tenue près du corps, pas un blazer rigide) : `hip_width`/`hip_depth` à ×1.4/×1.3 produit un
+      élargissement du bassin/jupe clairement visible au rendu (jambes nettement plus écartées).
+      Effet de `bust_size`/`bust_projection` confirmé par la mesure numérique de bounding box par
+      axe, mais visuellement masqué par le gilet ample de cette tenue précise (même limite de
+      principe que le blazer de business_02 — un vêtement non près du corps masque le changement
+      de silhouette sous-jacente, indépendamment du mécanisme).
+    - Tests mis à jour (`tests/test_body_morphology.py`, toujours zéro `bpy`) pour la nouvelle
+      forme `{bone: (x,y,z)}` de `build_pose_bone_scale_map()`. 100 tests passent après ce point.
