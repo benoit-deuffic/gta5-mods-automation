@@ -37,7 +37,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Headless GTA V Rig & Weight Transfer")
     parser.add_argument("--template", required=True, help="Path to base ped template .blend")
     parser.add_argument("--source-fbx", "--source-mesh", dest="source_mesh", required=True,
-                         help="Path to input raw mesh from the 3D backend: .fbx (Meshy) or .glb/.gltf (Tripo3D)")
+                         help="Path to input raw mesh from the 3D backend: .fbx (local backend) or .glb/.gltf (Tripo3D)")
     parser.add_argument("--output-dir", required=True, help="Destination folder for exported assets")
     parser.add_argument("--model-name", required=True, help="Model identifier")
     parser.add_argument("--vert-mapping", default="POLYINTERP_VNORPROJ")
