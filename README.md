@@ -160,6 +160,44 @@ partition de faces, bake UV) sans passer par SDXL — utile pour un test rapide
 (~1 s) avant de lancer un vrai run GPU (~1-2 min pour 6 caméras × plusieurs
 composants du corps).
 
+### Bien écrire le prompt
+
+Le pipeline est **conditionné par la profondeur** (ControlNet-depth) : la
+forme/silhouette vient déjà de la vraie géométrie 3D du ped, le prompt n'a
+donc pas besoin — et ne devrait pas essayer — de décrire une pose ou une
+anatomie. Il doit se concentrer sur : matière, couleur, motif, finition,
+éclairage. Ce qu'on a vu concrètement avec le prompt court utilisé lors des
+tests ("a dark leather jacket texture") : un résultat plat/incohérent (point
+14/16). L'exemple ci-dessous suit les bonnes pratiques générales de prompt
+SDXL (substantif de matière + détails de surface + éclairage) — pas encore
+comparé tel quel contre la version courte sur ce pipeline précis, à valider
+au prochain run réel :
+
+```bash
+--prompt "black leather biker jacket, worn matte leather texture, visible \
+stitching seams, metal zipper hardware, subtle creasing and wear at the \
+elbows and shoulders, soft studio lighting, high detail fabric close-up, \
+photorealistic material" \
+--skin-prompt "natural tanned human skin texture, photorealistic, subtle \
+pores and subsurface scattering, soft even studio lighting, no clothing, \
+no fabric, no jewelry, no makeup"
+```
+
+Quelques repères généraux pour écrire un bon prompt SDXL (pas spécifiques à
+ce pipeline, bonnes pratiques standard) :
+- Nommer le TYPE de matière explicitement ("leather", "denim", "cotton
+  fabric", "wool knit") plutôt qu'un adjectif seul ("dark") — SDXL a besoin
+  d'un substantif de matière pour générer un grain cohérent.
+- Ajouter 2-3 détails de surface concrets ("visible stitching", "zipper
+  hardware", "subtle creasing") plutôt qu'un prompt très court.
+- Préciser l'éclairage ("soft studio lighting") pour éviter que SDXL
+  n'invente des ombres dures incohérentes avec le rendu de profondeur.
+- Le garde-fou NSFW (`mcp_server/prompt_refiner._check_blocked`) s'applique
+  tel quel à `--prompt` ET `--skin-prompt` quand c'est appelé via l'outil
+  MCP `generate_ai_texture_reskin` — un prompt plus détaillé ne le
+  contourne pas, les mêmes mots-clés bloqués (mineurs, etc.) restent
+  filtrés.
+
 Produit un fichier `<nom_du_ped>_<composant>_reskin.png` par composant du
 corps détecté (ex. `uppr`, `lowr`, `head`, `hair` — un ped réel multi-
 composants en a généralement 3 à 5), plus un `<nom_du_ped>_reskin_manifest.json`
