@@ -91,3 +91,58 @@ def test_real_cli_round_trip_fails_loudly_on_garbage_ymt(cli_env, tmp_path: Path
 
     proc = subprocess.run([CLI_PATH, "inspect", str(garbage)], capture_output=True, text=True, timeout=30)
     assert proc.returncode != 0
+
+
+def test_real_export_xml_round_trips_a_ymt_binary_back_to_xml(cli_env, tmp_path: Path):
+    """export_binary_to_xml() is the INVERSE of convert_xml_to_binary() --
+    round-trip a real .ymt all the way: XML -> binary (convert_xml_to_binary)
+    -> XML again (export_binary_to_xml), and check the second XML still
+    recognizably describes CPedVariationInfo (added 2026-10-12 alongside the
+    layered_ped_builder/import_layered_ped pipeline, see
+    docs/architecture-decisions.md)."""
+    xml_dir = tmp_path / "xml"
+    binary_dir = tmp_path / "binary"
+    reexported_dir = tmp_path / "reexported"
+    xml_dir.mkdir()
+    ymt_builder.write_ymt_xml(xml_dir / "TestPed01.ymt.xml", "TestPed01",
+                              present_components=("head", "uppr", "lowr"))
+
+    convert_result = codewalker_convert.convert_xml_to_binary(xml_dir, binary_dir, "TestPed01",
+                                                               extensions=(".ymt",))
+    assert convert_result.status == "converted"
+
+    export_result = codewalker_convert.export_binary_to_xml(binary_dir / "TestPed01.ymt", reexported_dir)
+
+    assert export_result.status == "converted"
+    reexported_xml = reexported_dir / "TestPed01.ymt.xml"
+    assert reexported_xml.exists()
+    content = reexported_xml.read_text(encoding="utf-8")
+    assert "CPedVariationInfo" in content
+
+
+def test_real_export_tree_to_xml_mirrors_directory_structure(cli_env, tmp_path: Path):
+    """export_tree_to_xml() must preserve the layered base_all/mid/top
+    directory layout -- it's what layered_ped_builder.resolve_layered_components()
+    depends on to tell tiers apart afterwards."""
+    xml_dir = tmp_path / "xml"
+    binary_source = tmp_path / "binary_source"
+    reexported_root = tmp_path / "reexported_root"
+    xml_dir.mkdir()
+    ymt_builder.write_ymt_xml(xml_dir / "TestPed01.ymt.xml", "TestPed01")
+    convert_result = codewalker_convert.convert_xml_to_binary(xml_dir, binary_source, "TestPed01",
+                                                               extensions=(".ymt",))
+    assert convert_result.status == "converted"
+
+    # Mirror the real layered convention: the same binary file nested two
+    # levels deep, as it would be under base/base_all/<ped_name>/.
+    nested_dir = binary_source / "base" / "base_all" / "some_ped"
+    nested_dir.mkdir(parents=True)
+    (nested_dir / "TestPed01.ymt").write_bytes((binary_source / "TestPed01.ymt").read_bytes())
+
+    tree_result = codewalker_convert.export_tree_to_xml(binary_source, reexported_root)
+
+    assert tree_result.cli_missing is False
+    assert tree_result.failed == []
+    assert tree_result.converted == 2  # the top-level one + the nested one
+    assert (reexported_root / "TestPed01.ymt.xml").exists()
+    assert (reexported_root / "base" / "base_all" / "some_ped" / "TestPed01.ymt.xml").exists()

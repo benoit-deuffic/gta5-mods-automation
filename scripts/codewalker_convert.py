@@ -64,3 +64,86 @@ def convert_xml_to_binary(xml_dir: Path, output_dir: Path, model_name: str,
 
     produced = [str(p) for p in output_dir.glob(f"{model_name}.*") if p.suffix in extensions]
     return ConversionResult(status="converted", produced_files=produced, message=proc.stdout[-2000:])
+
+
+# Extensions `codewalker-cli export-xml` knows how to convert (binary ->
+# CodeWalker-XML). Real raw ped exports (e.g. the layered patch/base/
+# base_all convention) also contain .ymt manifests, which export-xml
+# gained support for 2026-10-12 (see docs/architecture-decisions.md).
+EXPORT_XML_EXTENSIONS = (".ydd", ".yft", ".ytd", ".ydr", ".ymt")
+
+
+def export_binary_to_xml(binary_path: Path, output_dir: Path) -> ConversionResult:
+    """Wraps `codewalker-cli export-xml --in <file> --out <dir>` -- the
+    INVERSE of convert_xml_to_binary(): takes ONE real raw RAGE binary file
+    (as extracted by the user via OpenIV, not a full .rpf/.dlc) and produces
+    its CodeWalker-XML equivalent (plus any embedded loose textures for
+    .ytd). Same mock-vs-real contract as convert_xml_to_binary: never
+    fabricates XML, reports "mock-skipped" if the CLI isn't configured.
+    """
+    cli_path = _resolve_cli_path()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not cli_path:
+        return ConversionResult(
+            status="mock-skipped",
+            message=(
+                "CodeWalker.Core CLI not configured/found (CODEWALKER_CLI_PATH). "
+                "Binary->XML export was NOT performed."
+            ),
+        )
+    if binary_path.suffix.lower() not in EXPORT_XML_EXTENSIONS:
+        return ConversionResult(
+            status="error",
+            message=f"Unsupported extension for export-xml: {binary_path.suffix} "
+                     f"(supported: {EXPORT_XML_EXTENSIONS})",
+        )
+
+    cmd = [cli_path, "export-xml", "--in", str(binary_path), "--out", str(output_dir)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return ConversionResult(status="error", message=f"CLI invocation failed: {exc}")
+
+    if proc.returncode != 0:
+        return ConversionResult(status="error", message=f"CLI exited {proc.returncode}: {proc.stderr[-2000:]}")
+
+    produced = [str(p) for p in output_dir.glob(f"{binary_path.name}*")]
+    return ConversionResult(status="converted", produced_files=produced, message=proc.stdout[-2000:])
+
+
+@dataclass
+class TreeExportResult:
+    converted: int = 0
+    failed: list[tuple[str, str]] = field(default_factory=list)  # (path, message)
+    cli_missing: bool = False
+
+
+def export_tree_to_xml(source_root: Path, output_root: Path,
+                        extensions: tuple[str, ...] = EXPORT_XML_EXTENSIONS) -> TreeExportResult:
+    """Walks `source_root` recursively for every real raw binary file
+    (.ydd/.yft/.ytd/.ydr/.ymt), mirrors the SAME relative directory
+    structure under `output_root`, and runs export_binary_to_xml() on each
+    -- the permanent version of the ad-hoc shell loop used earlier this
+    session to bulk-convert the real layered peds/template_ped/ asset tree
+    (830 real files, confirmed 0 failures against the real CLI). Does NOT
+    itself apply the base_all/mid/top layering rule -- that's
+    layered_ped_builder.resolve_layered_components()'s job, run against
+    this function's mirrored XML output.
+    """
+    cli_path = _resolve_cli_path()
+    if not cli_path:
+        return TreeExportResult(cli_missing=True)
+
+    result = TreeExportResult()
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in extensions:
+            continue
+        rel_dir = path.parent.relative_to(source_root)
+        out_dir = output_root / rel_dir
+        conv = export_binary_to_xml(path, out_dir)
+        if conv.status == "converted":
+            result.converted += 1
+        elif conv.status == "error":
+            result.failed.append((str(path), conv.message))
+    return result
