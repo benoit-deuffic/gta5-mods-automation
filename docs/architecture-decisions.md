@@ -741,3 +741,82 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
     `tests/test_codewalker_cli_integration.py` — ces 2 tests échouent aussi sur `main` dans
     cet environnement, binaire CodeWalker CLI réel indisponible/erreur d'exécution locale,
     vérifié avant de commencer ce travail ; aucun test cassé par ce changement).
+
+19. **Pipeline complet câblé + correction du bug de texture + clarification méthodologique
+    (2026-10-12)** :
+    - `scripts/codewalker_convert.py` gagne `export_binary_to_xml()` (l'inverse de
+      `convert_xml_to_binary()`, enveloppe `codewalker-cli export-xml`) et `export_tree_to_xml()`
+      (parcourt récursivement un arbre entier, miroir la structure de dossiers — version
+      pérenne de la boucle shell ad-hoc utilisée pour convertir les 830 fichiers réels de
+      `peds/template_ped/`, 0 échec confirmé).
+    - `scripts/import_layered_ped.py` (nouveau) : point d'entrée Blender headless réel qui
+      enchaîne `resolve_layered_components()` → import Sollumz par composant résolu → emprunt
+      du squelette business_02 → `rig_unskinned_body_components()` → `relink_external_textures()`
+      → sauvegarde `.blend` + rendu optionnel. `build_layered_ped()` est séparée de `main()`
+      spécifiquement pour rester testable avec un `bpy` factice (ordre d'appel/arguments),
+      sans processus Blender réel pour cette partie.
+    - **Bug de texture trouvé et corrigé** : Sollumz importe chaque image avec un chemin
+      RELATIF (`//nom.dds`) résolu contre le dossier du `.blend`, jamais celui du vrai `.dds`
+      (qui vit à côté du `.ydd.xml` exporté, un arbre de dossiers complètement différent) — le
+      matériau s'affichait donc dans une couleur plate au lieu de la vraie texture. **Piste
+      fausse explorée et abandonnée** : au départ pris pour un problème de décodage DDS côté
+      Blender (`img.has_data` restait `False` même après relink correct + `reload()`) — en
+      réalité un faux signal : les images Blender sont chargées paresseusement, `has_data` ne
+      passe à `True` qu'au moment où les pixels sont réellement échantillonnés (rendu), pas
+      juste après `reload()`. Un test comparatif a confirmé qu'un simple relink vers le `.dds`
+      brut suffit, sans conversion PNG ni dépendance supplémentaire.
+      `scripts/blender_rig_export.py::relink_external_textures(search_root)` indexe tous les
+      `.dds` sous `search_root` par nom de base et relie chaque image correspondante.
+    - **Vérifié pour de vrai de bout en bout** contre `peds/template_ped/` (830 fichiers, 3
+      niveaux réels) : export 830/830, import 10/10 composants, rig 10/10, 26 textures reliées
+      — jean déchiré, sangles de gilet, cheveux colorés visibles dans le rendu produit par le
+      code pérenne (plus un script jetable).
+    - **Clarification méthodologique importante (remarque de l'utilisateur)** : le rendu
+      produit par ce pipeline n'est PAS une simulation fidèle du rendu in-game. En jeu, chaque
+      composant occupe un slot UNIQUE choisi par le moteur selon les index de variation du
+      `.ymt` et la tenue sélectionnée (PedSelector/Menyoo) — pas "le fichier présent dans le
+      dossier le plus profond". Le jeu dispose aussi de la totalité de ses propres assets
+      (textures de peau, variantes manquantes dans notre extraction partielle). Ce pipeline
+      sert donc de **contrôle qualité mécanique pré-packaging** (les fichiers sont-ils valides,
+      bien riggés, texturés), pas d'aperçu fidèle du rendu final — à ne pas confondre.
+    - 11 nouveaux tests (3 orchestration `tests/test_import_layered_ped.py` + 2 round-trip CLI
+      réel `tests/test_codewalker_cli_integration.py`). 88 tests passent après ce point.
+
+20. **Système de morphologie corporelle par échelle d'os (2026-10-12)** : suite à une question
+    sur la faisabilité de modifier la morphologie d'un ped via un LLM local. Analyse : un LLM
+    texte ne peut PAS générer de géométrie 3D directement (limitation structurelle, pas
+    spécifique à ce projet) ; en revanche, il peut piloter des CURSEURS numériques nommés
+    (largeur d'épaules, longueur de jambes...) qui pilotent une déformation déterministe du mesh
+    de base déjà riguée — architecture retenue, implémentée sans la partie LLM pour l'instant.
+    Technique choisie : mise à l'échelle d'OS du squelette (`SKEL_Spine0-3`, `SKEL_Pelvis`,
+    `SKEL_L/R_Thigh`/`Calf`, `SKEL_L/R_Clavicle`, `SPR_L/R_Breast`, `SKEL_ROOT`) — **la même
+    technique que les sliders de corps du créateur de personnage MP Freemode du jeu lui-même**,
+    pas un système de cage Lattice inventé. `scripts/body_morphology.py` :
+    `MORPH_SLIDERS` (dict slider→os), `build_pose_bone_scale_map()` (logique pure, combine
+    plusieurs sliders sur un même os par multiplication, clamp [0.6, 1.6]), et
+    `apply_body_morphology(armature, slider_values)` (bpy).
+    **Piège trouvé et corrigé en cours de route** : la première implémentation utilisait
+    `bpy.ops.pose.armature_apply()`, qui semblait correct (réinitialise bien `pose_bone.scale`
+    à `(1,1,1)` comme si la déformation avait été appliquée) mais ne fait en réalité que
+    redéfinir la pose de repos de l'ARMATURE — elle ne re-bake PAS les données de sommets des
+    meshes. Comme le modificateur Armature déforme "pose actuelle relative à la pose de repos",
+    et que cet opérateur rend pose == repos, la déformation nette redevient silencieusement
+    NULLE juste après "l'application" (confirmé par un repro minimal : le scale de la pose bone
+    revient bien à l'identité, mais `mesh.vertices` ne bouge jamais). Cet opérateur sert à un
+    usage différent (transformer une pose animée en nouvelle T-pose pour du retargeting), pas à
+    un remodelage permanent. Fix réel : appliquer le MODIFICATEUR Armature lui-même sur chaque
+    mesh affecté (`bpy.ops.object.modifier_apply`), qui bake réellement la déformation dans les
+    coordonnées de sommets, puis réinjecter un modificateur Armature neuf (mêmes groupes de
+    sommets, inchangés) pour que Sollumz reconnaisse toujours le mesh comme riggé à l'export.
+    **Vérifié pour de vrai** : sliders exagérés appliqués au template business_02 (+15% taille,
+    +30% épaules, -25% taille, +20% jambes, +25% torse) → extent Z local du mesh de jambe passé
+    de 1.174 à 1.539 (confirmé numériquement), déformation massive et nette visible au rendu
+    (torse/épaules/jambes clairement élargis/allongés). **Limite confirmée visuellement et
+    documentée, non résolue** : les vêtements (jbib/lowr/...), riguée sur le MÊME squelette mais
+    pour les proportions non modifiées, ne suivent pas la déformation — déchirures/trous visibles
+    aux coutures dans le rendu de test. Rester proche de 1.0 (±15%) minimise l'effet ; un vrai
+    correctif nécessiterait de redéformer aussi les meshes de vêtements (hors scope ici).
+    9 nouveaux tests purs (`tests/test_body_morphology.py`, zéro `bpy`). La partie "LLM traduit
+    un prompt en valeurs de curseurs" n'est PAS encore construite (prochaine étape évoquée mais
+    pas commencée) — réutiliserait l'infrastructure Ollama/`prompt_refiner.py` existante avec un
+    schéma de sortie JSON de curseurs plutôt qu'un texte enrichi. 97 tests passent après ce point.
