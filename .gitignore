@@ -31,3 +31,4 @@ workspace_ollama_serve.log
 peds/
 *.rpf
 templates/*.blend
+templates/*.blend1

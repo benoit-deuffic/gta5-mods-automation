@@ -894,3 +894,42 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       déformation ni décalage visible entre corps et vêtements.
     - 6 nouveaux tests purs (`tests/test_layered_ped_builder.py`, zéro `bpy`). 104 tests passent
       après ce point.
+
+23. **Découverte que `alt/` fournit en réalité le corps nu de base (pas juste un donneur de
+    mesures) + tentative de calibration numérique invalidée + pitfall méthodologique
+    (2026-10-12)** : l'utilisateur clarifie que `alt/BeachGirl5/` (et son duplicata identique
+    `alt/CatalineNude/`, confirmé octet pour octet via `diff -rq`, zéro différence) contient le
+    skin PAR DÉFAUT à utiliser pour ce ped, pas juste une référence de mensurations ponctuelle.
+    Un dossier `alt/skinTextures/` (12 `.ytd`, convention `mp_fm_skin_f_{up,lo}_{ethnie}`) fournit
+    en plus les textures de peau standard GTA par ethnie.
+    - **Tentative de calibration numérique abandonnée, documentée honnêtement** : la première
+      approche (bbox des sommets pondérés par seuil de poids sur l'os cible) donnait un résultat
+      CONTRE-INTUITIF (le donneur "BeachGirl5" mesurait plus PETIT que la base sur buste et
+      hanches) — root cause identifiée : (a) le mesh de "base" comparé (`hash_15CCF9D6.model`)
+      est en réalité le gilet/veste biker avec rembourrage/sangles, pas de la peau nue — comparer
+      peau nue de donneur contre corps habillé de la base n'a aucun sens (volume de tissu ≠
+      volume de corps) ; (b) même en passant à une mesure de silhouette par tranche de hauteur Z
+      (indépendante de la pondération d'os), le résultat restait pollué par le BRAS du donneur
+      qui traverse la tranche de hauteur du buste en pose A/T, gonflant artificiellement la
+      largeur mesurée à cet endroit. Les deux scripts de mesure (`measure_bone_region_radius.py`,
+      supprimé après usage car méthodologiquement invalidé) et
+      `scripts/measure_silhouette_width.py` (conservé, docstring met en garde sur ces pièges)
+      documentent ce pitfall pour éviter de le refaire.
+    - **Conséquence directe** : puisque `BeachGirl5` devient LA base du corps (pas un ajustement
+      ponctuel par rapport à une autre base), la calibration numérique n'a plus d'objet — il n'y a
+      plus de "proportions de référence" différentes à viser, le corps importé EST la nouvelle
+      ligne de base (sliders de `body_morphology.py` = 1.0 signifie "tel qu'importé", pas
+      "proportions originales du jeu").
+    - `scripts/import_layered_ped.py` gagne `--extra-texture-roots` (et le paramètre
+      `extra_texture_roots` de `build_layered_ped()`), un mécanisme générique de passes de relink
+      additionnelles supplémentaires pour des dossiers de texture qui ne sont nulle part imbriqués
+      sous `ped_root` ni `body_donor_root` (ex. `alt/skinTextures/`).
+    - **Vérifié pour de vrai** : rebuild complet avec `--body-donor-root` (BeachGirl5) +
+      `--extra-texture-roots` (skinTextures exporté en XML) → 27 textures reliées, 18 non
+      trouvées (identique à avant l'ajout de skinTextures : confirmé qu'AUCUNE texture de
+      `skinTextures/` n'est en réalité référencée par les matériaux de BeachGirl5, qui apporte ses
+      propres textures `uppr_diff_*`/`lowr_diff_*` déjà correctement reliées — `skinTextures/`
+      serait pertinent pour un corps nu GÉNÉRIQUE sans texture propre, pas pour ce donneur-là).
+      Rendu final confirmé : peau du corps (bras/jambes/pieds) correctement texturée (plus de
+      couleur plate), seul le visage reste en placeholder magenta (texture de tête manquante du
+      jeu de fichiers fourni, gap déjà documenté, sans rapport avec ce travail).

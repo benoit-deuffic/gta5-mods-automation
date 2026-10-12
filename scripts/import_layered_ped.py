@@ -64,12 +64,18 @@ def parse_args():
                          help="Comma-separated component codes to take FROM the body donor "
                               "(default: uppr,lowr -- everything else always comes from this "
                               "ped's own normal layers, never the donor)")
+    parser.add_argument("--extra-texture-roots", default=None,
+                         help="Comma-separated extra directories to search for .dds textures "
+                              "(e.g. a separate skin-texture-only folder not nested under "
+                              "--ped-root or --body-donor-root) -- each gets its own additive "
+                              "relink_external_textures() pass")
     return parser.parse_args(raw_args)
 
 
 def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
                        body_donor_root: str | None = None,
-                       body_donor_components: tuple[str, ...] = ("uppr", "lowr")) -> dict:
+                       body_donor_components: tuple[str, ...] = ("uppr", "lowr"),
+                       extra_texture_roots: tuple[str, ...] = ()) -> dict:
     """The bpy-dependent orchestration: resolve layers, import, rig, relink
     textures. Returns a stats dict for the caller to report/log. Split out
     from main() so a test can call it with a fake bpy and assert on the
@@ -124,16 +130,19 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
     stats["rigged_count"] = len(rigged)
 
     relink_result = bre.relink_external_textures(ped_root)
+    extra_roots = list(extra_texture_roots)
     if body_donor_root:
-        # Donor textures live in a SEPARATE directory tree (not nested
-        # under ped_root) -- a second additive pass picks up whatever the
-        # first pass didn't find. relink_external_textures() re-walks and
-        # re-matches by basename each call, so calling it twice is safe
-        # (harmless redundant work for already-relinked images, genuinely
-        # new matches for donor-only textures).
-        donor_relink = bre.relink_external_textures(body_donor_root)
-        relink_result["relinked"] = list(set(relink_result["relinked"]) | set(donor_relink["relinked"]))
-        relink_result["not_found"] = [n for n in relink_result["not_found"] if n in donor_relink["not_found"]]
+        extra_roots.append(body_donor_root)
+    for root in extra_roots:
+        # Each extra root lives in a SEPARATE directory tree (not nested
+        # under ped_root) -- an additive pass picks up whatever earlier
+        # passes didn't find. relink_external_textures() re-walks and
+        # re-matches by basename each call, so calling it repeatedly is
+        # safe (harmless redundant work for already-relinked images,
+        # genuinely new matches for this root's own textures).
+        pass_result = bre.relink_external_textures(root)
+        relink_result["relinked"] = list(set(relink_result["relinked"]) | set(pass_result["relinked"]))
+        relink_result["not_found"] = [n for n in relink_result["not_found"] if n in pass_result["not_found"]]
     stats["textures_relinked"] = len(relink_result["relinked"])
     stats["textures_not_found"] = relink_result["not_found"]
 
@@ -210,9 +219,12 @@ def render_preview(new_meshes, out_png: str):
 def main():
     args = parse_args()
     donor_components = tuple(c.strip() for c in args.body_donor_components.split(",") if c.strip())
+    extra_roots = tuple(r.strip() for r in args.extra_texture_roots.split(",") if r.strip()) \
+        if args.extra_texture_roots else ()
     stats = build_layered_ped(args.template, args.ped_root, args.ped_name,
                                body_donor_root=args.body_donor_root,
-                               body_donor_components=donor_components)
+                               body_donor_components=donor_components,
+                               extra_texture_roots=extra_roots)
 
     print("[INFO] Resolved components:")
     for comp, path in stats.get("resolved_components", {}).items():
