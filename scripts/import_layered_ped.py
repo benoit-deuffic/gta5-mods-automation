@@ -222,6 +222,28 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
             obj.hide_render = True
             obj.hide_set(True)
 
+    # Hide stray duplicate ARMATURE objects -- found 2026-10-12: the user
+    # reported the skeleton "didn't look right" when inspecting
+    # templates/template_nude_generic.blend interactively in Blender.
+    # Root cause: some resolved components embed their OWN trivial/
+    # placeholder skeleton in their .ydd.xml (the same ones that produce
+    # the "SKEL_ROOT.001"/".002" floor-junk meshes just hidden above), and
+    # Sollumz's importer creates a brand-new Armature object for each one
+    # rather than reusing our existing `armature`. Those duplicate
+    # skeletons deform nothing visible (their only mesh is the floor junk,
+    # already hidden) but the ARMATURE OBJECTS THEMSELVES were never
+    # hidden, so Blender drew THREE full 104-bone skeletons overlapping at
+    # the same position -- confirmed by inspecting the real scene (3
+    # armature objects, all with hide_render=False, only one of which
+    # -- `armature` itself -- actually deforms a visible mesh). Any
+    # Armature object other than our own working `armature` is always
+    # junk by this function's contract (same reasoning as the mesh/empty
+    # hide step above) and must be hidden too.
+    for obj in list(bpy.data.objects):
+        if obj.type == 'ARMATURE' and obj is not armature:
+            obj.hide_render = True
+            obj.hide_set(True)
+
     stats["new_meshes"] = new_meshes
     return stats
 

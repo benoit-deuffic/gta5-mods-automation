@@ -985,3 +985,31 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       `generic skin swapped for: ['uppr', 'lowr']` (2 nœuds, un par composant, pas 6 comme avant
       le fix), rendu final confirmé : peau lisse et de tonalité normale sur bras/jambes, plus de
       bruit visible. 104/104 tests toujours verts.
+
+26. **Toutes les ethnicités de peau générique testées et validées numériquement (2026-10-12)** :
+    les 5 ethnicités restantes (`ara`/`bla`/`chi`/`lat`/`pak`, en plus de `whi` déjà testée) swapées
+    sans erreur via `apply_generic_skin_textures()`. Comparaison visuelle initiale jugée peu fiable
+    (rendu sombre, `ara` et `bla` semblaient proches à l'œil) — remplacée par une mesure numérique
+    directe des pixels de chaque texture chargée (moyenne RGB sur ~2000 texels échantillonnés) :
+    progression cohérente et correcte du plus clair au plus sombre (`whi` 0.656→`chi` 0.582→`ara`
+    0.519→`lat` 0.514→`pak` 0.476→`bla` 0.298), confirmant que `img.reload()` charge bien un
+    fichier distinct à chaque appel (pas de cache périmé) et que les 6 fichiers contiennent des
+    tons réellement différents.
+
+27. **Bug réel de squelettes dupliqués visibles trouvé et corrigé (2026-10-12)** : l'utilisateur
+    signale que le squelette "ne semble pas le bon" en inspectant
+    `templates/template_nude_generic.blend` dans Blender (bosses/flèches d'os à des angles
+    bizarres, aspect chaotique).
+    - **Root cause réelle, confirmée par inspection** : la scène contient en fait TROIS objets
+      ARMATURE à 104 os chacun (`a_f_y_business_02`, `hash_976FBF04`, `hash_A1286BE2`) — certains
+      composants résolus embarquent leur PROPRE squelette trivial/placeholder dans leur
+      `.ydd.xml` (les mêmes qui produisent les meshes "floor junk" `SKEL_ROOT.001`/`.002` déjà
+      masqués), et l'import Sollumz crée un nouvel objet Armature pour chacun au lieu de
+      réutiliser l'armature existante. Ces squelettes dupliqués ne déforment aucun mesh visible
+      (leur seul mesh associé est déjà masqué), mais les OBJETS ARMATURE eux-mêmes n'étaient
+      jamais masqués — Blender affichait donc TROIS squelettes complets superposés au même
+      endroit, d'où l'aspect "pas le bon" / chaotique signalé.
+    - **Fix** : tout objet de type ARMATURE autre que l'armature de travail choisie est
+      systématiquement du résidu (même logique que pour les meshes/empties), donc masqué.
+    - **Vérifié pour de vrai** : rebuild complet → `hash_976FBF04`/`hash_A1286BE2` passent à
+      `hide_render=True`, seule `a_f_y_business_02` reste visible. 104/104 tests toujours verts.
