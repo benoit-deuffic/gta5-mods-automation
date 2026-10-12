@@ -6,7 +6,11 @@ the module docstring for the full rule).
 """
 import logging
 
-from scripts.layered_ped_builder import resolve_layered_components
+from scripts.layered_ped_builder import (
+    resolve_layered_components,
+    resolve_body_donor_components,
+    resolve_layered_components_with_body_donor,
+)
 
 
 PED_NAME = "testped_dlc_01"
@@ -126,3 +130,69 @@ def test_mixed_raw_ydd_and_xml_tiers_both_resolve_independently(tmp_path):
 
     assert resolved["uppr"] == xml_file
     assert resolved["feet"] == raw_file
+
+
+def _donor_dir(tmp_path, donor_name="SomeDonor"):
+    folder = tmp_path / "alt" / donor_name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def test_body_donor_only_resolves_allowed_component_codes(tmp_path):
+    donor = _donor_dir(tmp_path)
+    uppr_file = _make_tier_file(donor, name="uppr_000_r.ydd")
+    _make_tier_file(donor, name="lowr_000_r.ydd")
+    _make_tier_file(donor, name="hair_000_u.ydd")  # NOT in allowed_components
+
+    resolved = resolve_body_donor_components(donor, allowed_components=("uppr",))
+
+    assert resolved == {"uppr": uppr_file}
+
+
+def test_body_donor_lowest_variant_wins_within_allowed_codes(tmp_path):
+    donor = _donor_dir(tmp_path)
+    _make_tier_file(donor, name="uppr_005_r.ydd")
+    lowest = _make_tier_file(donor, name="uppr_000_r.ydd")
+
+    resolved = resolve_body_donor_components(donor, allowed_components=("uppr", "lowr"))
+
+    assert resolved == {"uppr": lowest}
+
+
+def test_body_donor_overrides_base_ped_only_for_allowed_codes(tmp_path):
+    """The core 'by elimination' rule: the donor wins for uppr/lowr (its
+    allowed codes), but every OTHER component code still falls back to the
+    ped's own normal top>mid>base_all resolution -- the donor is NOT an
+    identity swap, just a body-measurement override."""
+    base_uppr = _make_tier_file(tmp_path, *_base_all_dir(tmp_path), name="uppr_000_r.ydd")
+    base_lowr = _make_tier_file(tmp_path, *_base_all_dir(tmp_path), name="lowr_000_r.ydd")
+    base_hair = _make_tier_file(tmp_path, *_base_all_dir(tmp_path), name="hair_000_u.ydd")
+
+    donor = _donor_dir(tmp_path)
+    donor_uppr = _make_tier_file(donor, name="uppr_000_r.ydd")
+    donor_lowr = _make_tier_file(donor, name="lowr_000_r.ydd")
+    donor_hair = _make_tier_file(donor, name="hair_000_u.ydd")  # should be ignored
+
+    resolved = resolve_layered_components_with_body_donor(
+        tmp_path, PED_NAME, donor, allowed_donor_components=("uppr", "lowr"),
+    )
+
+    assert resolved["uppr"] == donor_uppr  # donor wins
+    assert resolved["lowr"] == donor_lowr  # donor wins
+    assert resolved["hair"] == base_hair   # NOT donor_hair -- fell back to base
+    assert resolved["hair"] != donor_hair
+
+
+def test_body_donor_falls_back_to_base_when_donor_lacks_a_component(tmp_path):
+    """'superposer les éléments qui ne se trouvent pas dans un calque dans
+    un calque inférieur, d'arrière-plan' -- if the donor simply doesn't
+    define lowr at all, the base ped's own lowr must still resolve."""
+    base_lowr = _make_tier_file(tmp_path, *_top_dir(tmp_path), name="lowr_000_r.ydd")
+    donor = _donor_dir(tmp_path)
+    _make_tier_file(donor, name="uppr_000_r.ydd")  # donor has no lowr
+
+    resolved = resolve_layered_components_with_body_donor(
+        tmp_path, PED_NAME, donor, allowed_donor_components=("uppr", "lowr"),
+    )
+
+    assert resolved["lowr"] == base_lowr

@@ -38,7 +38,10 @@ import bpy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import blender_rig_export as bre  # noqa: E402
-from layered_ped_builder import resolve_layered_components  # noqa: E402
+from layered_ped_builder import (  # noqa: E402
+    resolve_layered_components,
+    resolve_layered_components_with_body_donor,
+)
 
 
 def parse_args():
@@ -52,17 +55,42 @@ def parse_args():
     parser.add_argument("--ped-name", required=True)
     parser.add_argument("--output-blend", required=True, help="Where to save the assembled .blend")
     parser.add_argument("--preview-png", default=None, help="Optional: also render a quick preview PNG")
+    parser.add_argument("--body-donor-root", default=None,
+                         help="Optional: directory of an already-exported-to-XML cross-ped "
+                              "'body donor' (e.g. a nude reference ped chosen for its exact "
+                              "bust/leg/hip measurements) whose uppr/lowr override this ped's "
+                              "own layers -- see layered_ped_builder.resolve_body_donor_components")
+    parser.add_argument("--body-donor-components", default="uppr,lowr",
+                         help="Comma-separated component codes to take FROM the body donor "
+                              "(default: uppr,lowr -- everything else always comes from this "
+                              "ped's own normal layers, never the donor)")
     return parser.parse_args(raw_args)
 
 
-def build_layered_ped(template_path: str, ped_root: str, ped_name: str) -> dict:
+def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
+                       body_donor_root: str | None = None,
+                       body_donor_components: tuple[str, ...] = ("uppr", "lowr")) -> dict:
     """The bpy-dependent orchestration: resolve layers, import, rig, relink
     textures. Returns a stats dict for the caller to report/log. Split out
     from main() so a test can call it with a fake bpy and assert on the
     call sequence without needing a real Blender process.
+
+    `body_donor_root`, when given, is a directory of already-exported
+    CodeWalker-XML files (.ydd.xml) for a DIFFERENT ped chosen purely for
+    its body-shape geometry (bust/legs/hips) -- see
+    layered_ped_builder.resolve_layered_components_with_body_donor() for
+    the full "by elimination" rule (only `body_donor_components` codes are
+    taken from it, everything else still comes from this ped's own layers).
     """
-    resolved = resolve_layered_components(Path(ped_root), ped_name,
-                                           extensions=(".ydd.xml",))
+    if body_donor_root:
+        resolved = resolve_layered_components_with_body_donor(
+            Path(ped_root), ped_name, Path(body_donor_root),
+            allowed_donor_components=tuple(body_donor_components),
+            extensions=(".ydd.xml",),
+        )
+    else:
+        resolved = resolve_layered_components(Path(ped_root), ped_name,
+                                               extensions=(".ydd.xml",))
     stats = {"resolved_components": {comp: str(p) for comp, p in resolved.items()}}
 
     bpy.ops.wm.open_mainfile(filepath=template_path)
@@ -96,6 +124,16 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str) -> dict:
     stats["rigged_count"] = len(rigged)
 
     relink_result = bre.relink_external_textures(ped_root)
+    if body_donor_root:
+        # Donor textures live in a SEPARATE directory tree (not nested
+        # under ped_root) -- a second additive pass picks up whatever the
+        # first pass didn't find. relink_external_textures() re-walks and
+        # re-matches by basename each call, so calling it twice is safe
+        # (harmless redundant work for already-relinked images, genuinely
+        # new matches for donor-only textures).
+        donor_relink = bre.relink_external_textures(body_donor_root)
+        relink_result["relinked"] = list(set(relink_result["relinked"]) | set(donor_relink["relinked"]))
+        relink_result["not_found"] = [n for n in relink_result["not_found"] if n in donor_relink["not_found"]]
     stats["textures_relinked"] = len(relink_result["relinked"])
     stats["textures_not_found"] = relink_result["not_found"]
 
@@ -171,7 +209,10 @@ def render_preview(new_meshes, out_png: str):
 
 def main():
     args = parse_args()
-    stats = build_layered_ped(args.template, args.ped_root, args.ped_name)
+    donor_components = tuple(c.strip() for c in args.body_donor_components.split(",") if c.strip())
+    stats = build_layered_ped(args.template, args.ped_root, args.ped_name,
+                               body_donor_root=args.body_donor_root,
+                               body_donor_components=donor_components)
 
     print("[INFO] Resolved components:")
     for comp, path in stats.get("resolved_components", {}).items():

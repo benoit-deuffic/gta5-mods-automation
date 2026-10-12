@@ -861,3 +861,36 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       de silhouette sous-jacente, indépendamment du mécanisme).
     - Tests mis à jour (`tests/test_body_morphology.py`, toujours zéro `bpy`) pour la nouvelle
       forme `{bone: (x,y,z)}` de `build_pose_bone_scale_map()`. 100 tests passent après ce point.
+
+22. **Calque "donneur de mensurations" cross-ped par élimination (2026-10-12)** : suite à la
+    découverte que `peds/template_ped/mp_f_freemode_01_mp_f_bikerdlc_01/alt/BeachGirl5/` contient
+    en réalité 6 peds nus/standalone complets fournis par l'utilisateur comme référence de
+    mensurations précises (buste, jambes, fessier), pas un simple calque patch classique.
+    - `scripts/layered_ped_builder.py` gagne `resolve_body_donor_components(donor_dir,
+      allowed_components)` (résout un dossier cross-ped, mais NE retient QUE les codes composant
+      explicitement autorisés — "par élimination" : un donneur typique fournit aussi
+      tête/cheveux/mains/pieds/tenue, qu'on ignore volontairement, sinon ce serait un
+      remplacement d'identité, pas une correction de mensurations) et
+      `resolve_layered_components_with_body_donor(ped_root, ped_name, donor_dir,
+      allowed_donor_components=("uppr","lowr"))` (résolution normale + le donneur gagne pour ses
+      codes autorisés, tout le reste retombe sur le calque de base existant — "aller superposer
+      les éléments qui ne se trouvent pas dans un calque dans un calque inférieur, d'arrière-plan"
+      au sens propre de l'utilisateur).
+    - **Vérifié pour de vrai** : squelette du `.yft` des 2 donneurs testés (`CatalinaNude`,
+      `Beachgirl5`) confirmé identique (mêmes 55 os `SKEL_*`, `SPR_L/R_Breast`) ; `uppr_000_r.ydd`/
+      `lowr_000_r.ydd` de chaque donneur importés réellement sur l'armature empruntée du projet et
+      superposés par rendu au ped de base → alignement et échelle corrects, zéro décalage/flottement
+      (confirmé visuellement). `CatalinaNude` arrivait déjà skinné nativement (104 groupes de
+      sommets dès l'import) ; `Beachgirl5` nécessitait le fallback heat-weight existant
+      (`rig_unskinned_body_components`), déjà géré sans changement.
+    - `scripts/import_layered_ped.py` câblé bout en bout : `--body-donor-root` (dossier XML du
+      donneur, déjà exporté séparément via `codewalker-cli export-xml`) + `--body-donor-components`
+      (défaut `uppr,lowr`). `relink_external_textures()` appelé deux fois (ped_root puis
+      body_donor_root, arbres de fichiers physiquement séparés) — vérifié sans danger, un second
+      passage additif ne fait que combler les textures non trouvées au premier passage.
+    - **Run réel complet confirmé** : `uppr`/`lowr` résolus vers `Beachgirl5`, tous les autres
+      codes (`task`/`jbib`/`hand`/`hair`/`feet`/`decl`/`berd`/`accs`) résolus vers la base comme
+      attendu, 10 composants importés/riggés, 27 textures reliées, rendu final sans aucune
+      déformation ni décalage visible entre corps et vêtements.
+    - 6 nouveaux tests purs (`tests/test_layered_ped_builder.py`, zéro `bpy`). 104 tests passent
+      après ce point.

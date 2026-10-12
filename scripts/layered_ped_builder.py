@@ -178,6 +178,66 @@ def resolve_layered_components(ped_root: Path, ped_name: str,
     return resolved
 
 
+def resolve_body_donor_components(donor_dir: Path, allowed_components: tuple[str, ...],
+                                   extensions: tuple[str, ...] = RECOGNIZED_EXTENSIONS) -> dict[str, Path]:
+    """Resolve components from a cross-ped "body donor" folder -- e.g. a
+    COMPLETELY DIFFERENT ped's own extracted component folder (its own
+    standalone mod, not part of this ped's base_all/mid/top convention),
+    used purely to borrow specific body-shape geometry.
+
+    Added 2026-10-12 per the user's own words (verbatim): they placed files
+    "qui ont exactement des mensurations (bustes, jambes+fessier)" under
+    `peds/<ped_name>/alt/<donor_name>/` and asked to assemble them with the
+    base ped "en procédant par élimination" -- meaning: use the donor's
+    file for a component code ONLY if that code is in `allowed_components`,
+    even if the donor folder defines other codes too (a donor is typically
+    a full standalone ped mod with its own head/hair/outfit, e.g. the real
+    `CatalinaNude`/`Beachgirl5` donors tested against this project: both
+    ship uppr+lowr+head+hair+hand+feet+decl, but we only ever want their
+    uppr/lowr here -- head/hair/outfit pieces must keep coming from the
+    ped's own normal layers, a body donor is NOT an identity swap).
+
+    Verified for real (2026-10-12) against two actual donor peds
+    (`alt/BeachGirl5/CatalinaNude/`, `alt/BeachGirl5/Beachgirl5/Beachgirl5/`):
+    both use the exact same universal GTA human skeleton (same bone names
+    down to SPR_L/R_Breast), and their uppr/lowr meshes import and align
+    at the correct scale/position against this project's own borrowed
+    skeleton with zero offset -- confirmed by a real Blender render
+    (overlaid cleanly on the base ped, no floating/misplaced/wrong-scale
+    geometry) -- see docs/architecture-decisions.md for the full writeup.
+
+    Returns `{component_code: path}`, restricted to `allowed_components`
+    (silently ignoring any other codes the donor folder happens to also
+    define -- that's the "elimination" part: we pick what we want FROM the
+    donor, we don't adopt the donor wholesale).
+    """
+    files = _matching_files(donor_dir, extensions)
+    best = _best_match_per_component(files)
+    return {component: match.path for component, match in best.items() if component in allowed_components}
+
+
+def resolve_layered_components_with_body_donor(
+    ped_root: Path, ped_name: str, donor_dir: Path,
+    allowed_donor_components: tuple[str, ...] = ("uppr", "lowr"),
+    extensions: tuple[str, ...] = RECOGNIZED_EXTENSIONS,
+) -> dict[str, Path]:
+    """resolve_layered_components() PLUS an extra, even-higher-priority
+    "body donor" override for body-shape-only components (see
+    resolve_body_donor_components's docstring for the full rationale).
+
+    Anything the donor does NOT provide (either because it genuinely lacks
+    that component, or because `allowed_donor_components` deliberately
+    excludes it) falls back to this ped's own normal background layer
+    (top > mid > base_all) -- matching the user's own words (verbatim,
+    2026-10-12): "aller superposer les éléments qui ne se trouvent pas
+    dans un calque dans un calque inférieur, d'arrière-plan".
+    """
+    resolved = resolve_layered_components(ped_root, ped_name, extensions)
+    donor_resolved = resolve_body_donor_components(donor_dir, allowed_donor_components, extensions)
+    resolved.update(donor_resolved)  # donor always wins for its allowed codes
+    return resolved
+
+
 # TODO(integration): wire resolve_layered_components() into the pipeline step
 # that runs just before Sollumz import, e.g. a new --layered-ped-root /
 # --ped-name pair of CLI args on scripts/blender_rig_export.py's main(), or a
