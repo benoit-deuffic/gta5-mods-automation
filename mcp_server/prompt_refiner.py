@@ -32,7 +32,8 @@ _SYSTEM_PROMPT = (
 # docs/architecture-decisions.md point 5 on Meshy/NSFW policy, which applies
 # to this local step too since it feeds the same downstream generator).
 _BLOCKED_KEYWORDS = (
-    "nude", "naked", "nsfw", "sex", "porn", "explicit", "fetish", "underage", "minor",
+    "fetish", "underage", "minor", "nude", "nudity", "naked", "explicit",
+    "sexual", "sex ", "nsfw", "porn", "erotic",
 )
 
 

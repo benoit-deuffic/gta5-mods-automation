@@ -250,8 +250,27 @@ static int RunExportXml(string[] args)
                 xml = MetaXml.GetXml(f, out filename, outDir);
                 break;
             }
+            case ".ymt":
+            {
+                // .ymt is a plain Meta/PSO file, NOT an RSC7 resource -- loaded via
+                // YmtFile.Load() directly (same as RunInspect's round-trip check),
+                // not RpfFile.GetResourceFile<T>(). No outputfolder param on this
+                // overload since .ymt never embeds loose texture/model files.
+                var f = new YmtFile();
+                f.Load(bytes);
+                f.Name = baseName;
+                xml = MetaXml.GetXml(f, out filename);
+                // MetaXml.GetXml(YmtFile,...) derives the filename from
+                // ymt.RpfFileEntry?.Name, not GameFile.Name -- loose files (not
+                // read from an RPF) never have an RpfFileEntry, so fn comes back
+                // "" and filename is literally ".xml" (non-empty, so an
+                // IsNullOrEmpty check doesn't catch it). Always override with
+                // baseName instead of trusting the returned filename.
+                filename = baseName + ".xml";
+                break;
+            }
             default:
-                Console.Error.WriteLine($"[FAIL] Unsupported extension for export-xml: {ext} (supported: .ydd/.yft/.ytd/.ydr)");
+                Console.Error.WriteLine($"[FAIL] Unsupported extension for export-xml: {ext} (supported: .ydd/.yft/.ytd/.ydr/.ymt)");
                 return 1;
         }
 
