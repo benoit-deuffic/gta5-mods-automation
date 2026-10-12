@@ -186,6 +186,59 @@ def select_default_body_components(objects):
     return selected, others
 
 
+def bind_meshes_to_armature(armature, mesh_objects) -> None:
+    """Re-point already-skinned meshes at `armature`: every Armature
+    modifier targeting a DIFFERENT armature is retargeted, and the mesh is
+    re-parented to `armature` keeping its world transform. Only valid when
+    the other armature has the same bones (names + rest pose) -- e.g. the
+    per-import copy Sollumz creates from an external .yft skeleton
+    identical to the template's. Meshes with no Armature modifier are left
+    to rig_unskinned_body_components()."""
+    for obj in mesh_objects:
+        mods = [m for m in obj.modifiers if m.type == 'ARMATURE' and m.object is not armature]
+        if not mods:
+            continue
+        for mod in mods:
+            mod.object = armature
+        world = obj.matrix_world.copy()
+        obj.parent = armature
+        obj.matrix_world = world
+
+
+def remap_vertex_groups(mesh_objects, mapping: dict[str, str]) -> int:
+    """Move every weight of the vertex groups named in `mapping` onto the
+    group named by its value (created if absent, ADDed if the vertex is
+    already in it), removing the source groups. All sources are read before
+    anything is written, so a group that is both a source and a target is
+    handled correctly. Returns the number of vertices moved."""
+    moved = 0
+    for obj in mesh_objects:
+        sources = {g.index: mapping[g.name] for g in obj.vertex_groups if g.name in mapping}
+        if not sources:
+            continue
+        pending = [(v.index, sources[g.group], g.weight) for v in obj.data.vertices
+                   for g in v.groups if g.group in sources and g.weight > 0.0]
+        for group in [g for g in obj.vertex_groups if g.index in sources]:
+            obj.vertex_groups.remove(group)
+        for vertex_index, target, weight in pending:
+            group = obj.vertex_groups.get(target) or obj.vertex_groups.new(name=target)
+            group.add([vertex_index], weight, 'ADD')
+        moved += len({vertex_index for vertex_index, _, _ in pending})
+    return moved
+
+
+def meshes_without_weights(mesh_objects) -> list[str]:
+    """Names of meshes where NO vertex has a nonzero weight in any vertex
+    group -- they won't deform with the skeleton at all. Vertex-group
+    PRESENCE is not enough: a failed heat auto-weighting ("Bone Heat
+    Weighting: failed to find solution") still creates every group, empty."""
+    return [
+        obj.name for obj in mesh_objects
+        if obj.type == 'MESH' and len(obj.data.vertices)
+        and not any(g.weight > 0.0 for v in obj.data.vertices for g in v.groups)
+    ]
+
+
 def rig_unskinned_body_components(armature, mesh_objects):
     """Binds any currently-unskinned mesh in `mesh_objects` to `armature`
     via Blender's automatic (heat-map) weight generation.
@@ -289,7 +342,10 @@ def relink_external_textures(search_root: str) -> dict:
     Returns {"relinked": [...names...], "not_found": [...names...]}.
     """
     dds_index = {}
-    for dirpath, _dirs, files in os.walk(search_root):
+    # followlinks=True: the industrialized layout (import_xml/<ped> ->
+    # import/<ped>_xml) is built from directory SYMLINKS; os.walk's default
+    # silently skips them, leaving every texture unrelinked.
+    for dirpath, _dirs, files in os.walk(search_root, followlinks=True):
         for fn in files:
             if fn.lower().endswith(".dds"):
                 dds_index.setdefault(os.path.splitext(fn)[0].lower(), os.path.join(dirpath, fn))
@@ -297,6 +353,20 @@ def relink_external_textures(search_root: str) -> dict:
     relinked = []
     not_found = []
     for img in bpy.data.images:
+        # Sollumz creates a black 512x512 GENERATED placeholder for every
+        # texture it can't find at import time (normal/spec maps typically).
+        # Left as-is, a black normal map turns the whole material black in
+        # Cycles, so a placeholder whose name matches a real .dds is
+        # converted back to a FILE image. Unmatched placeholders are left
+        # alone (not reported: they may be legitimately procedural).
+        if img.source == 'GENERATED':
+            real_path = dds_index.get(img.name.lower())
+            if real_path is not None:
+                img.source = 'FILE'
+                img.filepath = real_path
+                img.reload()
+                relinked.append(img.name)
+            continue
         if img.source != 'FILE':
             continue
         real_path = dds_index.get(img.name.lower())
@@ -357,36 +427,54 @@ def apply_generic_skin_textures(body_objects: dict, skin_textures_root: str,
         if not os.path.isfile(target_path):
             not_found.append(component)
             continue
-        images = set()
+        for image_name in apply_diffuse_texture([mesh_obj], target_path):
+            swapped.append((component, image_name, target_path))
+    return {"swapped": swapped, "not_found": not_found}
+
+
+def apply_diffuse_texture(mesh_objects, dds_path: str, only_missing: bool = False) -> list[str]:
+    """Point every Base-Color-feeding Image Texture node of `mesh_objects`
+    at `dds_path`. Returns the names of the images that were replaced.
+    With `only_missing`, nodes whose image already resolves to a real file
+    are left alone -- only unresolved ones (GENERATED placeholder or FILE
+    pointing at a nonexistent path) are filled.
+
+    Only the node feeding the Principled BSDF's Base Color is the diffuse
+    texture -- PITFALL found 2026-10-12: swapping EVERY Image Texture node
+    (base color AND normal AND specular) to the same diffuse file makes the
+    normal-map chain (Sollumz "BumpSampler" -> RGB Curves -> bump) read a
+    flat color as normals, producing dark blotchy noise on the skin.
+
+    The node gets a (shared, check_existing) image loaded from `dds_path`
+    instead of mutating its current image in place: the old datablock may
+    be shared with other components' materials, and GENERATED placeholders
+    (texture not found at import, see relink_external_textures) are
+    replaced the same way.
+    """
+    replaced = []
+    new_image = None
+    for mesh_obj in mesh_objects:
         for slot in mesh_obj.material_slots:
-            if slot.material is None or not slot.material.use_nodes:
+            material = slot.material
+            if material is None or not material.use_nodes:
                 continue
-            for node in slot.material.node_tree.nodes:
-                # Only the node feeding Base Color is the diffuse/skin-tone
-                # texture -- PITFALL found 2026-10-12: an earlier version of
-                # this function swapped EVERY FILE-source Image Texture node
-                # (base color AND normal map AND specular map) to the SAME
-                # plain diffuse skin file. A flat-color image interpreted as
-                # a normal map (through the node graph's RGB Curves -> bump
-                # conversion) produces visible dark blotchy/noise artifacts
-                # on the skin -- confirmed by a real render, root-caused by
-                # inspecting the material node graph (Sollumz names this
-                # node "DiffuseSampler", vs "BumpSampler"/"SpecSampler" for
-                # the other maps, each feeding a DIFFERENT Principled BSDF
-                # input -- Base Color only for DiffuseSampler).
-                if node.type != 'TEX_IMAGE' or node.image is None or node.image.source != 'FILE':
+            for node in material.node_tree.nodes:
+                if node.type != 'TEX_IMAGE' or node.image is None:
                     continue
                 feeds_base_color = any(
                     link.to_node.type == 'BSDF_PRINCIPLED' and link.to_socket.name == 'Base Color'
-                    for link in slot.material.node_tree.links if link.from_node == node
+                    for link in material.node_tree.links if link.from_node == node
                 )
-                if feeds_base_color:
-                    images.add(node.image)
-        for img in images:
-            img.filepath = target_path
-            img.reload()
-            swapped.append((component, img.name, target_path))
-    return {"swapped": swapped, "not_found": not_found}
+                if not feeds_base_color:
+                    continue
+                if only_missing and node.image.source == 'FILE' \
+                        and os.path.isfile(bpy.path.abspath(node.image.filepath)):
+                    continue
+                if new_image is None:
+                    new_image = bpy.data.images.load(dds_path, check_existing=True)
+                replaced.append(node.image.name)
+                node.image = new_image
+    return replaced
 
 
 def main():

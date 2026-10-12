@@ -38,9 +38,14 @@ import bpy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import blender_rig_export as bre  # noqa: E402
+import body_morphology  # noqa: E402
 from layered_ped_builder import (  # noqa: E402
+    bone_group_remap,
+    declared_bone_counts,
     resolve_layered_components,
+    resolve_component_diffuse,
     resolve_layered_components_with_body_donor,
+    skeleton_bone_names,
 )
 
 
@@ -75,10 +80,53 @@ def parse_args():
                               "donor's uppr/lowr, decoupling the borrowed body SHAPE from the "
                               "donor's own bespoke skin TONE -- makes the donor reusable as a "
                               "generic nude base. Requires --body-donor-root.")
-    parser.add_argument("--generic-skin-ethnicity", default="whi",
-                         help="Ethnicity code for --generic-skin-root (ara/bla/chi/lat/pak/whi, "
-                              "default: whi)")
+    parser.add_argument("--ethnicity", "--generic-skin-ethnicity", dest="ethnicity", default="whi",
+                         help="Ethnicity code (ara/bla/chi/lat/pak/whi, default: whi): picks each "
+                              "component's <comp>_diff_<NNN>_<letter>_<race>.ytd texture variation "
+                              "and the --generic-skin-root file")
+    parser.add_argument("--morphs", default=None,
+                         help="Optional body morphology sliders applied after assembly, e.g. "
+                              "'bust_size=1.2,hip_width=1.1' -- see body_morphology.MORPH_SLIDERS "
+                              f"for valid names (values clamped to "
+                              f"[{body_morphology.SLIDER_MIN}, {body_morphology.SLIDER_MAX}])")
+    parser.add_argument("--bust-size", default=None,
+                         help="Optional EU bra size to fit the bust to, e.g. '80A' or just 'B' (keeps the "
+                              "body's own band): measured on the mesh and reshaped until the bust "
+                              "circumference matches (body_morphology.fit_bust)")
+    parser.add_argument("--glutes", default=None, choices=sorted(body_morphology.GLUTE_SHAPES),
+                         help="Optional buttock shape: measured on the mesh and reshaped until the "
+                              "lateral (projection) and posterior (hip width) waist-to-hip ratios "
+                              "match body_morphology.GLUTE_SHAPES (body_morphology.fit_glutes)")
+    parser.add_argument("--glute-height", default=None, choices=sorted(body_morphology.GLUTE_HEIGHTS),
+                         help="Optional height of the buttocks' most prominent point between the "
+                              "top of the intergluteal cleft and the gluteal fold "
+                              "(body_morphology.GLUTE_HEIGHTS)")
+    parser.add_argument("--skeleton-yft", default=None,
+                         help="CodeWalker-XML .yft whose skeleton is used for a ped that ships "
+                              "without its own <ped-name>.yft.xml (e.g. an MP Freemode component "
+                              "pack): must match the --template skeleton")
     return parser.parse_args(raw_args)
+
+
+def _external_skeleton_import_kwargs(skeleton_yft: Path) -> dict:
+    """sollumz.import_assets kwargs that use `skeleton_yft` as the .ydd's
+    external skeleton. use_custom_settings=True makes Sollumz read EVERY
+    import setting from the operator instead of the user's preferences, so
+    the user's current preference values are copied over first (texture
+    mode etc. must not silently change); writing the preferences instead
+    would persist to the user's Blender config."""
+    prefs = next(addon.preferences for key, addon in bpy.context.preferences.addons.items()
+                 if "sollumz" in key.lower()).import_settings
+    op_props = bpy.ops.sollumz.import_assets.get_rna_type().properties.keys()
+    kwargs = {
+        prop.identifier: getattr(prefs, prop.identifier)
+        for prop in prefs.bl_rna.properties
+        if prop.identifier in op_props and prop.identifier != "rna_type"
+    }
+    kwargs.update(use_custom_settings=True,
+                  dwd_import_external_skeleton="SAVED",
+                  dwd_import_external_skeleton_saved_path=str(skeleton_yft.resolve()))
+    return kwargs
 
 
 def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
@@ -86,7 +134,8 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
                        body_donor_components: tuple[str, ...] = ("uppr", "lowr"),
                        extra_texture_roots: tuple[str, ...] = (),
                        generic_skin_root: str | None = None,
-                       generic_skin_ethnicity: str = "whi") -> dict:
+                       ethnicity: str = "whi",
+                       fallback_skeleton_yft: str | None = None) -> dict:
     """The bpy-dependent orchestration: resolve layers, import, rig, relink
     textures. Returns a stats dict for the caller to report/log. Split out
     from main() so a test can call it with a fake bpy and assert on the
@@ -108,7 +157,7 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
     else:
         resolved = resolve_layered_components(Path(ped_root), ped_name,
                                                extensions=(".ydd.xml",))
-    stats = {"resolved_components": {comp: str(p) for comp, p in resolved.items()}}
+    stats: dict = {"resolved_components": {comp: str(p) for comp, p in resolved.items()}}
 
     bpy.ops.wm.open_mainfile(filepath=template_path)
     for module in ("bl_ext.user_default.sollumz", "sollumz"):
@@ -124,6 +173,25 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
         stats["error"] = "Template lacks a skeleton armature."
         return stats
 
+    # The component .ydd files are natively skinned (BlendIndices/
+    # BlendWeights) but carry no skeleton: without one, Sollumz drops that
+    # skinning and we'd have to fall back to heat auto-weights, which fail
+    # silently on these meshes ("Bone Heat Weighting: failed to find
+    # solution", every vertex left at weight 0 -- found 2026-10-12: morphs
+    # and animations had NO effect on the body). The ped's own <ped>.yft
+    # (GTA layout: next to the <ped>/ folder) is that skeleton; a ped
+    # shipped without one (e.g. an MP Freemode DLC component pack) uses
+    # `fallback_skeleton_yft` -- the skeleton matching the template.
+    own_skeleton = Path(ped_root) / f"{ped_name}.yft.xml"
+    skeleton_yft = own_skeleton if own_skeleton.is_file() else \
+        Path(fallback_skeleton_yft) if fallback_skeleton_yft else None
+    if skeleton_yft is not None and not skeleton_yft.is_file():
+        stats["error"] = f"fallback skeleton not found: {skeleton_yft}"
+        return stats
+    import_kwargs = _external_skeleton_import_kwargs(skeleton_yft) if skeleton_yft else {}
+    stats["skeleton_yft"] = str(skeleton_yft) if skeleton_yft else None
+    stats["skeleton_is_fallback"] = skeleton_yft is not None and skeleton_yft is not own_skeleton
+
     before_objs = set(bpy.data.objects)
     failed_imports = []
     new_meshes_by_component: dict[str, list] = {}
@@ -131,7 +199,7 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
         before_this_import = set(bpy.data.objects)
         try:
             bpy.ops.sollumz.import_assets(directory=str(path.parent) + "/",
-                                           files=[{"name": path.name}])
+                                           files=[{"name": path.name}], **import_kwargs)
         except Exception as exc:
             failed_imports.append((component, str(exc)))
             continue
@@ -140,11 +208,40 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
         ]
     stats["failed_imports"] = failed_imports
 
+    # Components whose bone palette uses the facial-less bone order (MP
+    # Freemode DLC: 107 slots) imported against the full skeleton get their
+    # out-of-place indices' weights moved back to the right bones -- see
+    # layered_ped_builder.bone_group_remap().
+    stats["bone_remaps"], stats["bone_remap_errors"] = {}, {}
+    skeleton_names = None
+    for component, meshes in new_meshes_by_component.items():
+        counts = declared_bone_counts(resolved[component])
+        if skeleton_yft is None or not counts:
+            continue
+        if skeleton_names is None:
+            skeleton_names = skeleton_bone_names(skeleton_yft)
+        if counts == {len(skeleton_names)}:
+            continue
+        if len(counts) != 1:
+            stats["bone_remap_errors"][component] = f"mixed declared bone counts {sorted(counts)}"
+            continue
+        try:
+            mapping = bone_group_remap(skeleton_names, counts.pop())
+        except ValueError as exc:
+            stats["bone_remap_errors"][component] = str(exc)
+            continue
+        stats["bone_remaps"][component] = bre.remap_vertex_groups(meshes, mapping)
+
     new_meshes = [o for o in (set(bpy.data.objects) - before_objs) if o.type == 'MESH']
     stats["imported_mesh_count"] = len(new_meshes)
 
+    # Sollumz gives each external-skeleton import its own copy of the
+    # armature; same bones (names/order/rest pose) as the template's, so
+    # re-point the meshes at our working armature.
+    bre.bind_meshes_to_armature(armature, new_meshes)
     rigged = bre.rig_unskinned_body_components(armature, new_meshes)
     stats["rigged_count"] = len(rigged)
+    stats["unweighted_meshes"] = bre.meshes_without_weights(new_meshes)
 
     relink_result = bre.relink_external_textures(ped_root)
     extra_roots = list(extra_texture_roots)
@@ -163,6 +260,23 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
     stats["textures_relinked"] = len(relink_result["relinked"])
     stats["textures_not_found"] = relink_result["not_found"]
 
+    # Fill each component's UNRESOLVED diffuse the way the game names it
+    # (<comp>_diff_<NNN>_* .ytd), since the texture name embedded in the
+    # drawable's shader can be stale -- see
+    # layered_ped_builder.resolve_component_diffuse(). Diffuses that already
+    # resolve to a real file are kept (only_missing): whether the game also
+    # overrides those can't be verified offline.
+    component_diffuse = {}
+    for component, meshes in new_meshes_by_component.items():
+        dds = resolve_component_diffuse(resolved[component], ethnicity)
+        if dds is None or not meshes:
+            continue
+        replaced = bre.apply_diffuse_texture(meshes, str(dds), only_missing=True)
+        if replaced:
+            component_diffuse[component] = dds.name
+            stats["textures_not_found"] = [n for n in stats["textures_not_found"] if n not in replaced]
+    stats["component_diffuse"] = component_diffuse
+
     if generic_skin_root:
         # Decouples the body donor's borrowed SHAPE from its own bespoke
         # skin TONE -- see blender_rig_export.apply_generic_skin_textures()
@@ -178,7 +292,7 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
             if meshes:
                 body_objects[component] = meshes[0]
         skin_swap_result = bre.apply_generic_skin_textures(
-            body_objects, generic_skin_root, ethnicity=generic_skin_ethnicity)
+            body_objects, generic_skin_root, ethnicity=ethnicity)
         stats["generic_skin_swapped"] = skin_swap_result["swapped"]
         stats["generic_skin_not_found"] = skin_swap_result["not_found"]
 
@@ -308,8 +422,18 @@ def render_preview(new_meshes, out_png: str):
     bpy.ops.render.render(write_still=True)
 
 
+def _hips_line(m) -> str:
+    return (f"waist {m['waist_cm']} cm, hips {m['hips_cm']} cm; profile depth {m['waist_depth_cm']}/"
+            f"{m['hip_depth_cm']} cm = lateral waist-to-hip {m['lateral_whr']}; width "
+            f"{m['waist_width_cm']}/{m['hip_width_cm']} cm = posterior waist-to-hip {m['posterior_whr']} "
+            f"(~{m['shape']}); apex at {m['apex_position']} of cleft-to-fold (~{m['height']})")
+
+
 def main():
     args = parse_args()
+    sliders = body_morphology.parse_slider_spec(args.morphs) if args.morphs else {}
+    if args.bust_size:
+        body_morphology.parse_bra_size(args.bust_size)  # fail before the (long) build on a typo
     donor_components = tuple(c.strip() for c in args.body_donor_components.split(",") if c.strip())
     extra_roots = tuple(r.strip() for r in args.extra_texture_roots.split(",") if r.strip()) \
         if args.extra_texture_roots else ()
@@ -318,7 +442,8 @@ def main():
                                body_donor_components=donor_components,
                                extra_texture_roots=extra_roots,
                                generic_skin_root=args.generic_skin_root,
-                               generic_skin_ethnicity=args.generic_skin_ethnicity)
+                               ethnicity=args.ethnicity,
+                               fallback_skeleton_yft=args.skeleton_yft)
 
     print("[INFO] Resolved components:")
     for comp, path in stats.get("resolved_components", {}).items():
@@ -328,6 +453,19 @@ def main():
         sys.exit(1)
     print(f"[INFO] armature={stats['armature']} imported={stats['imported_mesh_count']} "
           f"rigged={stats['rigged_count']} textures_relinked={stats['textures_relinked']}")
+    print(f"[INFO] missing diffuse filled by .ytd convention: {stats['component_diffuse']}")
+    if not stats["skeleton_yft"]:
+        print(f"[WARN] no {args.ped_name}.yft.xml in {args.ped_root} and no --skeleton-yft: native "
+              f".ydd skinning lost, fell back to heat auto-weights")
+    elif stats["skeleton_is_fallback"]:
+        print(f"[INFO] no {args.ped_name}.yft.xml, using fallback skeleton {args.skeleton_yft}")
+    if stats["bone_remaps"]:
+        print(f"[INFO] skin weights moved to the right bones (vertices per component): {stats['bone_remaps']}")
+    for component, err in stats["bone_remap_errors"].items():
+        print(f"[WARN] component '{component}' was built for another skeleton, weights NOT fixed: {err}")
+    if stats["unweighted_meshes"]:
+        print(f"[WARN] meshes with NO vertex weights (won't follow the skeleton, morphs or "
+              f"animations): {stats['unweighted_meshes']}")
     if stats["textures_not_found"]:
         print(f"[WARN] {len(stats['textures_not_found'])} textures not found in the asset set: "
               f"{stats['textures_not_found']}")
@@ -337,6 +475,59 @@ def main():
             print(f"[WARN] generic skin texture not found for: {stats['generic_skin_not_found']}")
     for component, err in stats["failed_imports"]:
         print(f"[FAIL] import of component '{component}' failed: {err}")
+
+    if sliders:
+        morph = body_morphology.apply_body_morphology(bpy.data.objects[stats["armature"]], sliders)
+        print(f"[INFO] morphs {sliders}: bones={list(morph['applied_bones'])} "
+              f"reshaped_meshes={len(morph['reshaped_meshes'])}")
+        if morph["skipped_bones"]:
+            print(f"[WARN] bones missing from skeleton, skipped: {morph['skipped_bones']}")
+        if morph["regional_bones"]:
+            print(f"[INFO] bones not weighted on the mesh, scaled as a vertex region instead: "
+                  f"{morph['regional_bones']}")
+        if morph["no_effect_bones"]:
+            print(f"[WARN] no mesh is weighted to these bones (or their children), their sliders "
+                  f"changed nothing: {morph['no_effect_bones']}")
+
+    armature = bpy.data.objects[stats["armature"]]
+    if args.bust_size:
+        fit = body_morphology.fit_bust(armature, args.bust_size)
+        if "error" in fit:
+            print(f"[FAIL] bust fit {args.bust_size}: {fit['error']}")
+            sys.exit(1)
+        base, result = fit["base"], fit["result"]
+        print(f"[BUST] base: underbust {base['underbust_cm']} cm, bust {base['bust_cm']} cm (~{base['size']})")
+        print(f"[BUST] requested {args.bust_size}: target bust {fit['target_bust_cm']} cm, region scale "
+              f"{fit['scale']} -> underbust {result['underbust_cm']} cm, bust {result['bust_cm']} cm "
+              f"(~{result['size']})")
+        if not fit["reached"]:
+            print(f"[WARN] bust target {fit['target_bust_cm']} cm not reachable within region scale "
+                  f"{body_morphology.BUST_FIT_RANGE}: closest shape applied")
+        if fit["band_mismatch"]:
+            print(f"[WARN] requested band of {args.bust_size} differs from the measured underbust "
+                  f"{base['underbust_cm']} cm: band changes are not supported, only the cup was fitted")
+    else:
+        chest = body_morphology.measure_chest(armature)
+        if chest:
+            print(f"[BUST] underbust {chest['underbust_cm']} cm, bust {chest['bust_cm']} cm (~{chest['size']})")
+
+    if args.glutes or args.glute_height:
+        fit = body_morphology.fit_glutes(armature, args.glutes, args.glute_height)
+        if "error" in fit:
+            print(f"[FAIL] glute fit: {fit['error']}")
+            sys.exit(1)
+        print(f"[GLUTES] base: {_hips_line(fit['base'])}")
+        print(f"[GLUTES] requested shape={args.glutes} height={args.glute_height} {fit['targets']}: "
+              f"scales {fit['scales']}, apex shift {fit['shift_cm']} cm -> "
+              + (_hips_line(fit["result"]) if fit["result"] else "result not measurable"))
+        if not fit["reached"]:
+            print(f"[WARN] glute targets {fit['targets']} not all reachable (scales "
+                  f"{body_morphology.GLUTE_FIT_RANGE}, apex shift {body_morphology.GLUTE_SHIFT_RANGE} m): "
+                  f"closest shape applied")
+    else:
+        hips = body_morphology.measure_hips(armature)
+        if hips:
+            print(f"[GLUTES] {_hips_line(hips)}")
 
     Path(args.output_blend).parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=args.output_blend)

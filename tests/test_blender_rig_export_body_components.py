@@ -140,3 +140,30 @@ def test_rig_unskinned_body_components_noop_when_nothing_to_rig(fake_bpy_module)
 
     assert rigged == []
     fake_bpy_module.ops.object.parent_set.assert_not_called()
+
+
+def test_meshes_without_weights_flags_empty_groups_not_just_missing_ones(fake_bpy_module):
+    # A failed heat auto-weighting leaves every vertex group present but empty.
+    module = _load_module(fake_bpy_module)
+    from types import SimpleNamespace as NS
+    weighted = NS(name="weighted", type="MESH", data=NS(vertices=[NS(groups=[NS(weight=0.7)])]))
+    empty = NS(name="empty", type="MESH", data=NS(vertices=[NS(groups=[NS(weight=0.0)]), NS(groups=[])]))
+    no_verts = NS(name="no_verts", type="MESH", data=NS(vertices=[]))
+    assert module.meshes_without_weights([weighted, empty, no_verts]) == ["empty"]
+
+
+def test_bind_meshes_to_armature_retargets_only_foreign_armature_modifiers(fake_bpy_module):
+    module = _load_module(fake_bpy_module)
+    from types import SimpleNamespace as NS
+
+    class Matrix:
+        def copy(self):
+            return self
+    working, foreign = NS(name="working"), NS(name="foreign")
+    skinned = NS(modifiers=[NS(type="ARMATURE", object=foreign)], parent=foreign, matrix_world=Matrix())
+    unskinned = NS(modifiers=[], parent=None, matrix_world=Matrix())
+
+    module.bind_meshes_to_armature(working, [skinned, unskinned])
+
+    assert skinned.modifiers[0].object is working and skinned.parent is working
+    assert unskinned.parent is None

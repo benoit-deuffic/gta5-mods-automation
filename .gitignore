@@ -29,6 +29,11 @@ workspace_ollama_serve.log
 # ped files (.ydd/.yft/.ymt/.ytd/.yed/.awc from CodeWalker/OpenIV) must stay
 # local to the machine that extracted them, never pushed to the repo.
 peds/
+import/
+import_xml/
 *.rpf
 templates/*.blend
 templates/*.blend1
+# assembled test .blend files embed extracted game/mod meshes and textures
+output_test*.blend
+*.blend1

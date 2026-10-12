@@ -9,6 +9,9 @@
   },
   "blender": {
     "timeout_seconds": 300,
+    "layered_template_path": "import/blender/template_beachgirl5_skeleton_native.blend",
+    "layered_skeleton_yft": "import_xml/mp_f_freemode_01.yft.xml",
+    "layered_timeout_seconds": 900,
     "template_female_path": "templates/template_female_a_f_y_business_02.blend",
     "template_male_path": "templates/template_male_a_m_y_business_02.blend",
     "base_ped_female": "a_f_y_business_02",

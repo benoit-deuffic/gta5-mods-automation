@@ -93,3 +93,66 @@ def test_all_documented_sliders_are_non_empty_bone_axis_maps():
         for bone, mask in bone_axis_masks.items():
             assert isinstance(bone, str) and bone.startswith(("SKEL_", "SPR_")), (slider_name, bone)
             assert len(mask) == 3 and all(v in (0, 1) for v in mask), (slider_name, bone, mask)
+
+
+def test_parse_slider_spec_reads_name_value_pairs():
+    from scripts.body_morphology import parse_slider_spec
+    assert parse_slider_spec("bust_size=1.2, hip_width=1.1,") == {"bust_size": 1.2, "hip_width": 1.1}
+
+
+def test_parse_slider_spec_rejects_malformed_entry():
+    import pytest
+    from scripts.body_morphology import parse_slider_spec
+    with pytest.raises(ValueError):
+        parse_slider_spec("bust_size1.2")
+    with pytest.raises(ValueError):
+        parse_slider_spec("bust_size=big")
+
+
+def test_regional_scale_fades_from_center_to_radius():
+    from scripts.body_morphology import regional_scale_points
+    axes = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    center = (0.0, 0.0, 0.0)
+    # only projection (local y) shrinks
+    points = [(0.0, 0.0, 0.0), (0.0, -0.05, 0.0), (0.0, -0.1, 0.0), (0.0, -0.2, 0.0), (0.05, 0.0, 0.0)]
+    out = regional_scale_points(points, center, axes, (1.0, 0.5, 1.0), inner=0.0, outer=0.1)
+
+    assert out[0] == (0.0, 0.0, 0.0)              # center fixed
+    w = (1 - 0.25) ** 2                           # d/r = 0.5
+    assert abs(out[1][1] - (-0.05 * (1 - 0.5 * w))) < 1e-12
+    assert out[2] == (0.0, -0.1, 0.0)             # at radius: unchanged
+    assert out[3] == (0.0, -0.2, 0.0)             # outside: unchanged
+    assert abs(out[4][0] - 0.05) < 1e-12 and abs(out[4][1]) < 1e-12  # x axis untouched
+
+
+def test_regional_scale_follows_rotated_bone_axes():
+    from scripts.body_morphology import regional_scale_points
+    # bone local x points along world y: scaling local x must move world y only
+    axes = [(0, 1, 0), (-1, 0, 0), (0, 0, 1)]
+    out = regional_scale_points([(0.0, 0.02, 0.0)], (0.0, 0.0, 0.0), axes, (2.0, 1.0, 1.0), inner=0.0, outer=1.0)
+    w = (1 - 0.0004) ** 2
+    assert abs(out[0][0]) < 1e-12
+    assert abs(out[0][1] - 0.02 * (1 + w)) < 1e-12
+
+
+def test_regional_scale_is_full_strength_inside_inner_radius():
+    from scripts.body_morphology import regional_scale_points
+    axes = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    out = regional_scale_points([(0.0, -0.05, 0.0)], (0.0, 0.0, 0.0), axes, (1.0, 0.8, 1.0), inner=0.06, outer=0.11)
+    assert abs(out[0][1] - (-0.04)) < 1e-12
+
+
+def test_bust_region_anchor_is_apex_pushed_back_to_sternum_depth():
+    from scripts.body_morphology import bust_region_anchor
+    forward = (0.0, -1.0, 0.0)  # GTA peds face -y
+    points = [
+        (0.10, -0.18, 0.34),   # left breast apex (most forward on that side)
+        (0.10, -0.15, 0.28),   # lower breast
+        (-0.10, -0.19, 0.34),  # right breast: other side, ignored for the left bone
+        (0.0, -0.135, 0.335),  # sternum, midline, apex height
+        (0.0, -0.20, 0.10),    # midline but far below: not the sternum at apex height
+    ]
+    anchor = bust_region_anchor(points, bone_head=(0.095, -0.155, 0.281), forward=forward)
+    assert anchor == (0.10, -0.135, 0.34)
+    # no midline vertex -> not a breast region
+    assert bust_region_anchor(points[:3], (0.095, -0.155, 0.281), forward) is None

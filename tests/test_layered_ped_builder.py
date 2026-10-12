@@ -6,6 +6,8 @@ the module docstring for the full rule).
 """
 import logging
 
+import pytest
+
 from scripts.layered_ped_builder import (
     resolve_layered_components,
     resolve_body_donor_components,
@@ -196,3 +198,67 @@ def test_body_donor_falls_back_to_base_when_donor_lacks_a_component(tmp_path):
     )
 
     assert resolved["lowr"] == base_lowr
+
+
+def _ytd(folder, name, file_name):
+    (folder / f"{name}.ytd.xml").write_text(
+        f"<TextureDictionary><Item><Name>{name}</Name><FileName>{file_name}</FileName></Item></TextureDictionary>",
+        encoding="utf-8")
+    (folder / file_name).write_bytes(b"dds")
+
+
+def test_component_diffuse_follows_ytd_name_convention_not_shader_name(tmp_path):
+    # Real case: CatalinaNude's pubis mesh lives in teef_000_u and its shader
+    # names a nonexistent task_diff_001_a_uni; the game uses teef_diff_000_*.
+    from scripts.layered_ped_builder import resolve_component_diffuse
+    drawable = tmp_path / "teef_000_u.ydd.xml"
+    drawable.write_text("<Drawables/>", encoding="utf-8")
+    _ytd(tmp_path, "teef_diff_000_b_uni", "teef_diff_000_b_uni.dds")
+    _ytd(tmp_path, "teef_diff_000_a_uni", "teef_diff_000_a_uni.dds")
+    _ytd(tmp_path, "teef_diff_001_a_uni", "teef_diff_001_a_uni.dds")
+
+    assert resolve_component_diffuse(drawable) == tmp_path / "teef_diff_000_a_uni.dds"
+
+
+def test_component_diffuse_prefers_requested_ethnicity_and_reads_inner_filename(tmp_path):
+    from scripts.layered_ped_builder import resolve_component_diffuse
+    drawable = tmp_path / "uppr_000_r.ydd.xml"
+    _ytd(tmp_path, "uppr_diff_000_a_ara", "mp_fm_skin_f_up_ara.dds")
+    _ytd(tmp_path, "uppr_diff_000_f_whi", "mp_fm_skin_f_up_whi.dds")
+
+    assert resolve_component_diffuse(drawable, "whi") == tmp_path / "mp_fm_skin_f_up_whi.dds"
+    assert resolve_component_diffuse(drawable, "ara") == tmp_path / "mp_fm_skin_f_up_ara.dds"
+    # unknown ethnicity, no "uni": falls back to the first variation
+    assert resolve_component_diffuse(drawable, "zzz") == tmp_path / "mp_fm_skin_f_up_ara.dds"
+
+
+def test_component_diffuse_none_when_no_ytd_or_dds_missing(tmp_path):
+    from scripts.layered_ped_builder import resolve_component_diffuse
+    drawable = tmp_path / "hair_000_u.ydd.xml"
+    assert resolve_component_diffuse(drawable) is None
+    (tmp_path / "hair_diff_000_a_uni.ytd.xml").write_text(
+        "<TextureDictionary><Item><FileName>gone.dds</FileName></Item></TextureDictionary>", encoding="utf-8")
+    assert resolve_component_diffuse(drawable) is None
+
+
+def test_skeleton_compatibility_helpers(tmp_path):
+    from scripts.layered_ped_builder import bone_group_remap, declared_bone_counts, skeleton_bone_names
+    yft = tmp_path / "p.yft.xml"
+    yft.write_text("<Fragment><Drawable><Skeleton><Bones>"
+                   "<Item><Name>SKEL_ROOT</Name></Item><Item><Name>FB_L_Brow_Out_000</Name></Item>"
+                   "<Item><Name>RB_Neck_1</Name></Item></Bones></Skeleton></Drawable></Fragment>",
+                   encoding="utf-8")
+    names = skeleton_bone_names(yft)
+    assert names == ["SKEL_ROOT", "FB_L_Brow_Out_000", "RB_Neck_1"]
+
+    ydd = tmp_path / "c.ydd.xml"
+    ydd.write_text('<A><Unknown1 value="107" /><Unknown1 value="107" /></A>', encoding="utf-8")
+    assert declared_bone_counts(ydd) == {107}
+
+    # vanilla index 1 = RB_Neck_1, imported as FB_L_Brow_Out_000 on this skeleton
+    assert bone_group_remap(names, 2) == {"FB_L_Brow_Out_000": "RB_Neck_1"}
+    assert bone_group_remap(names, 3) == {}
+    with pytest.raises(ValueError):
+        bone_group_remap(names, 1)
+    with pytest.raises(ValueError):
+        skeleton_bone_names(ydd)

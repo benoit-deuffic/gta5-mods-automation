@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 # underscore and a numeric variant index: e.g. "jbib_000_u.ydd",
 # "accs_diff_000_a_uni.ytd" (component "accs", we don't need the rest).
 _COMPONENT_RE = re.compile(
-    r"^(jbib|lowr|hand|accs|decl|uppr|feet|hair|berd|task)_(\d+)",
+    r"^(jbib|lowr|hand|accs|decl|uppr|feet|hair|berd|task|head|teef)_(\d+)",
     re.IGNORECASE,
 )
 
@@ -125,6 +126,58 @@ def _best_match_per_component(files: list[Path]) -> dict[str, ComponentMatch]:
         if current is None or variant_index < current.variant_index:
             best[component] = ComponentMatch(component, variant_index, path)
     return best
+
+
+def resolve_component_diffuse(drawable_path: Path, ethnicity: str = "whi") -> Path | None:
+    """Return the .dds the GAME uses as diffuse for a component drawable,
+    or None if it can't be determined from the exported XML tree.
+
+    GTA picks a ped component's diffuse by FILE NAME convention, not by the
+    texture name embedded in the drawable's shader: drawable
+    ``<comp>_<NNN>_<u|r>`` uses ``<comp>_diff_<NNN>_<letter>_<race>.ytd``
+    (letter = texture variation, race = ethnicity or ``uni``). The embedded
+    shader name can be stale -- e.g. CatalinaNude's ``uppr_000_r`` is a
+    renamed ``uppr_015_r`` still pointing at a nonexistent
+    ``uppr_diff_015_a_whi``, and its pubis mesh (``task_001_u``, shipped
+    inside ``teef_000_u``) points at a nonexistent ``task_diff_001_a_uni``,
+    while ``teef_diff_000_a_uni.ytd`` holds the real texture.
+
+    Variation choice: race == ``ethnicity`` first, then ``uni``, then the
+    first in sorted order (lowest letter = default variation). The .dds is
+    the first ``<FileName>`` of that ``.ytd.xml``, looked up next to it
+    (CodeWalker's export dumps embedded textures alongside).
+    """
+    stem = drawable_path.name
+    for ext in sorted(RECOGNIZED_EXTENSIONS, key=len, reverse=True):
+        if stem.lower().endswith(ext.lower()):
+            stem = stem[: -len(ext)]
+            break
+    match = _COMPONENT_RE.match(stem)
+    if not match:
+        return None
+    component, variant = match.group(1).lower(), match.group(2)
+    folder = drawable_path.parent
+    candidates = sorted(folder.glob(f"{component}_diff_{variant}_*.ytd.xml"))
+    if not candidates:
+        return None
+
+    def race(path: Path) -> str:
+        return path.name[: -len(".ytd.xml")].rsplit("_", 1)[-1].lower()
+
+    for wanted in (ethnicity.lower(), "uni"):
+        preferred = [p for p in candidates if race(p) == wanted]
+        if preferred:
+            candidates = preferred
+            break
+    try:
+        file_name = ET.parse(candidates[0]).getroot().findtext(".//FileName")
+    except ET.ParseError:
+        logger.warning("unparseable texture dictionary: %s", candidates[0])
+        return None
+    if not file_name:
+        return None
+    dds = folder / file_name
+    return dds if dds.is_file() else None
 
 
 def resolve_layered_components(ped_root: Path, ped_name: str,
@@ -236,6 +289,58 @@ def resolve_layered_components_with_body_donor(
     donor_resolved = resolve_body_donor_components(donor_dir, allowed_donor_components, extensions)
     resolved.update(donor_resolved)  # donor always wins for its allowed codes
     return resolved
+
+
+# --- Skeleton compatibility ---------------------------------------------------
+# A component .ydd.xml carries skin indices but no skeleton. Each drawable
+# model declares the size of its bone-matrix palette (<Unknown1 value="N"/>
+# = byte 0 of CodeWalker's SkeletonBinding, the only use of that tag in a
+# .ydd.xml); its <BoneIDs> map palette slots to skeleton bone indices. The
+# shipped mp_f_freemode_01.yft (verified 2026-10-12: internal name
+# pack:/mp_f_freemode_01, byte-identical to CatalinaNude.yft) has 128 bones
+# with 21 facial bones FB_*_000 at 103-123 and RB_Neck_1, SPR_L/R_Breast,
+# IK_Root at 124-127. MP Freemode DLC components (e.g.
+# mp_f_freemode_01_female_freemode_beach) declare a 107-slot identity
+# palette = that skeleton WITHOUT the facial bones (128 - 21): their
+# index-103 vertices sit on the back of the neck, 5.8 cm from RB_Neck_1 and
+# 11 cm from FB_L_Brow_Out_000, the bone index 103 names on the real
+# skeleton. Imported as-is, that hair/collar would follow an eyebrow. How
+# the game itself resolves those slots is not verified.
+
+_DECLARED_BONE_COUNT_RE = re.compile(r'<Unknown1 value="(\d+)"')
+_INSERTED_FACIAL_BONE_RE = re.compile(r"^FB_.+_000$")
+
+
+def skeleton_bone_names(yft_xml: Path) -> list[str]:
+    """Bone names of a CodeWalker-XML .yft's skeleton, in index order."""
+    bones = ET.parse(yft_xml).getroot().find(".//Skeleton/Bones")
+    if bones is None:
+        raise ValueError(f"no <Skeleton><Bones> in {yft_xml}")
+    return [item.findtext("Name", "") for item in bones.findall("Item")]
+
+
+def declared_bone_counts(ydd_xml: Path) -> set[int]:
+    """Skeleton bone counts declared by the drawable models of a .ydd.xml."""
+    return {int(n) for n in _DECLARED_BONE_COUNT_RE.findall(
+        ydd_xml.read_text(encoding="utf-8", errors="ignore"))}
+
+
+def bone_group_remap(skeleton_names: list[str], component_bone_count: int) -> dict[str, str]:
+    """Vertex-group renames that put the skin weights of a component with a
+    `component_bone_count`-slot palette back on the right bones once
+    imported against `skeleton_names` (Sollumz names each group after
+    skeleton_names[index]): {wrong group: right bone}, {} when the counts
+    match. The component's bone order is taken to be `skeleton_names`
+    without the FB_*_000 facial bones; ValueError if that doesn't give
+    exactly `component_bone_count` bones (unknown layout -- don't guess)."""
+    if component_bone_count == len(skeleton_names):
+        return {}
+    base = [name for name in skeleton_names if not _INSERTED_FACIAL_BONE_RE.match(name)]
+    if len(base) != component_bone_count:
+        raise ValueError(f"component built for {component_bone_count} bones, skeleton has "
+                         f"{len(skeleton_names)} ({len(base)} without FB_*_000): unknown bone layout")
+    return {skeleton_names[i]: base[i] for i in range(component_bone_count)
+            if skeleton_names[i] != base[i]}
 
 
 # TODO(integration): wire resolve_layered_components() into the pipeline step

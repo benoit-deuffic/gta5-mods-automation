@@ -21,9 +21,11 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_server import ai_reskin_runner, blender_runner, prompt_refiner, validator
 from mcp_server.text3d_backend import get_backend
-from scripts import codewalker_convert, package_builder, xml_manifest_updater, ymt_builder
+from scripts import codewalker_convert, industrialize_pipeline, package_builder, xml_manifest_updater, ymt_builder
 
 mcp = FastMCP("gtav-ped-mcp")
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 WORKSPACE_DIR = Path(os.environ.get("PIPELINE_WORKSPACE_DIR", "./workspace")).resolve()
 DELIVERY_OUTPUT_DIR = Path(os.environ.get("DELIVERY_OUTPUT_DIR", "./dist")).resolve()
@@ -185,6 +187,68 @@ def compile_gtav_ped(target_name: str, fbx_path: str, gender: str = "female") ->
             "errors": artifact_report.errors,
             "warnings": artifact_report.warnings,
         },
+    }
+
+
+@mcp.tool()
+def build_layered_ped(ped_name: str, body_description: str = "") -> dict:
+    """Build a ped from the user's raw extracted assets under import/ into a
+    rigged, textured .blend (+ preview PNG), optionally reshaping the bust
+    and/or the buttocks from a free-text description.
+
+    Chain: scripts/industrialize_pipeline.industrialize() (binary -> XML,
+    import_xml/, ped skeleton) -> prompt_refiner.infer_body_targets(
+    body_description) when a description is given (e.g. "bonnet 80A,
+    fesses bombées et hautes" -> bra size "80A", glutes "round", glute
+    height "high") ->
+    blender_runner.build_layered_ped() (scripts/import_layered_ped.py),
+    which MEASURES the body and fits the bust circumference / the glute
+    proportions (lateral and posterior waist-to-hip ratios, apex height) to
+    those targets (no base size to declare).
+    `ped_name` is the folder name under import/ (case-sensitive, e.g.
+    "CatalinaNude"). Stops before Blender if the conversion or the size
+    extraction fails -- an unchanged ped must never be returned for a
+    reshape request. `measurements` holds the measured before/after lines.
+    """
+    try:
+        conversion = industrialize_pipeline.industrialize()
+    except industrialize_pipeline.IndustrializeError as exc:
+        return {"ped_name": ped_name, "status": "error", "error": f"conversion: {exc}"}
+
+    targets = None
+    if body_description:
+        try:
+            targets = prompt_refiner.infer_body_targets(body_description)
+        except prompt_refiner.PromptRefinerError as exc:
+            return {"ped_name": ped_name, "status": "error", "error": f"body target extraction: {exc}"}
+
+    blender_cfg = _CONFIG.get("blender", {})
+    out_dir = WORKSPACE_DIR / ped_name
+    result = blender_runner.build_layered_ped(
+        template_path=PROJECT_ROOT / blender_cfg["layered_template_path"],
+        skeleton_yft=PROJECT_ROOT / blender_cfg["layered_skeleton_yft"],
+        ped_root=industrialize_pipeline.IMPORT_XML_DIR,
+        ped_name=ped_name,
+        output_blend=out_dir / f"{ped_name}.blend",
+        bust_size=targets.bra_size if targets else None,
+        glutes=targets.glutes if targets else None,
+        glute_height=targets.glute_height if targets else None,
+        preview_png=out_dir / f"{ped_name}_preview.png",
+        timeout_s=blender_cfg.get("layered_timeout_seconds", 900),
+    )
+    return {
+        "ped_name": ped_name,
+        "status": result.status,
+        "output_blend": str(result.output_blend) if result.status == "built" else None,
+        "preview_png": str(result.preview_png) if result.preview_png else None,
+        "conversion": conversion,
+        "bra_size": targets.bra_size if targets else None,
+        "glutes": targets.glutes if targets else None,
+        "glute_height": targets.glute_height if targets else None,
+        "targets_model": targets.model if targets else None,
+        "measurements": result.measurements,
+        "warnings": result.warnings,
+        "log_tail": result.log[-2000:] if result.status != "built" else "",
     }
 
 

@@ -91,18 +91,38 @@ def test_relink_reports_not_found_without_crashing(fake_bpy_module, tmp_path):
     img.reload.assert_not_called()
 
 
-def test_relink_skips_non_file_backed_images(fake_bpy_module, tmp_path):
+def test_relink_converts_matching_generated_placeholder_to_file(fake_bpy_module, tmp_path):
+    # Sollumz leaves a black GENERATED placeholder for textures it couldn't
+    # find at import time; a black normal map renders the material black.
     module = _load_module(fake_bpy_module)
-    real_dds = tmp_path / "generated_texture.dds"
+    real_dds = tmp_path / "head_normal_021.dds"
     real_dds.write_bytes(b"x")
 
-    img = FakeImage("generated_texture", source='GENERATED')
+    img = FakeImage("head_normal_021", source='GENERATED')
     fake_bpy_module.data.images = [img]
 
     result = module.relink_external_textures(str(tmp_path))
 
+    assert result == {"relinked": ["head_normal_021"], "not_found": []}
+    assert img.source == 'FILE'
+    assert img.filepath == str(real_dds)
+    img.reload.assert_called_once()
+
+
+def test_relink_leaves_unmatched_generated_and_other_sources_alone(fake_bpy_module, tmp_path):
+    module = _load_module(fake_bpy_module)
+    (tmp_path / "packed_texture.dds").write_bytes(b"x")
+
+    procedural = FakeImage("procedural_noise", source='GENERATED')
+    packed = FakeImage("packed_texture", source='VIEWER')
+    fake_bpy_module.data.images = [procedural, packed]
+
+    result = module.relink_external_textures(str(tmp_path))
+
     assert result == {"relinked": [], "not_found": []}
-    img.reload.assert_not_called()
+    assert procedural.source == 'GENERATED'
+    procedural.reload.assert_not_called()
+    packed.reload.assert_not_called()
 
 
 def test_relink_picks_first_match_when_duplicate_basenames_exist(fake_bpy_module, tmp_path):
@@ -122,3 +142,23 @@ def test_relink_picks_first_match_when_duplicate_basenames_exist(fake_bpy_module
 
     assert result["relinked"] == ["dup"]
     assert img.filepath.endswith("dup.dds")
+
+
+def test_relink_follows_directory_symlinks(fake_bpy_module, tmp_path):
+    # import_xml/<ped> is a symlink to import/<ped>_xml in the industrialized
+    # pipeline -- os.walk's default skipped it and nothing got relinked.
+    module = _load_module(fake_bpy_module)
+    real_dir = tmp_path / "CatalinaNude_xml"
+    real_dir.mkdir()
+    (real_dir / "uppr_diff_000_a_whi.dds").write_bytes(b"fake dds bytes")
+    search_root = tmp_path / "import_xml"
+    search_root.mkdir()
+    (search_root / "CatalinaNude").symlink_to(real_dir, target_is_directory=True)
+
+    img = FakeImage("uppr_diff_000_a_whi", filepath="//uppr_diff_000_a_whi.dds")
+    fake_bpy_module.data.images = [img]
+
+    result = module.relink_external_textures(str(search_root))
+
+    assert result["relinked"] == ["uppr_diff_000_a_whi"]
+    assert img.filepath == str(search_root / "CatalinaNude" / "uppr_diff_000_a_whi.dds")

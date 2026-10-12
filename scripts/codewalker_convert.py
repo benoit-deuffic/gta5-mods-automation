@@ -26,12 +26,33 @@ class ConversionResult:
     message: str = ""
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+# Where scripts/fetch_codewalker.sh + `dotnet publish` put the CLI in this repo.
+REPO_CLI_PATH = REPO_ROOT / "tools" / "CodeWalkerCli" / "publish" / "codewalker-cli"
+
+
 def _resolve_cli_path() -> str | None:
     configured = os.environ.get("CODEWALKER_CLI_PATH", "").strip()
     if configured and Path(configured).exists():
         return configured
     found = shutil.which("codewalker-cli")
-    return found
+    if found:
+        return found
+    return str(REPO_CLI_PATH) if REPO_CLI_PATH.exists() else None
+
+
+def _cli_env() -> dict[str, str]:
+    """The CLI is a framework-dependent .NET 8 apphost: with dotnet installed
+    per-user (~/.dotnet, not a system package) it fails with "You must
+    install .NET" unless DOTNET_ROOT is set, and without ICU it needs
+    invariant globalization. Default both instead of relying on every shell
+    exporting them; explicit values from the environment win."""
+    env = dict(os.environ)
+    user_dotnet = Path.home() / ".dotnet"
+    if "DOTNET_ROOT" not in env and user_dotnet.is_dir():
+        env["DOTNET_ROOT"] = str(user_dotnet)
+    env.setdefault("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1")
+    return env
 
 
 def convert_xml_to_binary(xml_dir: Path, output_dir: Path, model_name: str,
@@ -52,7 +73,7 @@ def convert_xml_to_binary(xml_dir: Path, output_dir: Path, model_name: str,
 
     cmd = [cli_path, "convert", "--in", str(xml_dir), "--out", str(output_dir), "--name", model_name]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=_cli_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
         return ConversionResult(status="error", message=f"CLI invocation failed: {exc}")
 
@@ -101,7 +122,7 @@ def export_binary_to_xml(binary_path: Path, output_dir: Path) -> ConversionResul
 
     cmd = [cli_path, "export-xml", "--in", str(binary_path), "--out", str(output_dir)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=_cli_env())
     except (OSError, subprocess.TimeoutExpired) as exc:
         return ConversionResult(status="error", message=f"CLI invocation failed: {exc}")
 

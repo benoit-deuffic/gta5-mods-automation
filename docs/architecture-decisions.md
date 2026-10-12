@@ -1037,6 +1037,226 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       l'utilisateur), qui disparaissent simplement puisque ces meshes ne sont plus du tout
       importés dans la scène.
     - **Vérifié pour de vrai** : rebuild complet → `armature=Beachgirl5` (128 os), un seul objet
-      ARMATURE dans la scène entière (zéro fantôme/doublon business_02), 10 composants
-      importés/riggés, rendu final confirmé (silhouette propre, sans dédoublement). 104/104 tests
-      toujours verts.
+      ARMATURE dans la scène entière (zéro fantôme/doublon business_02),
+      importés/riggés, rendu final confirmé (silhouette propre, sans dédoublement). 104/104 tests toujours verts.
+
+29. **Script d'industrialisation du pipeline (2026-10-12)** : Création de `scripts/industrialize_pipeline.py`.
+    - **Objectif** : Automatiser la préparation des assets pour une production à grande échelle.
+    - **Fonctionnalités** :
+        - Détection des assets binaires nécessitant une conversion.
+        - Exportation massive vers le format XML via `codewalker_convert`.
+        - Gestion automatique des liens symboliques vers `import_xml/`.
+    - **Validation** : Test réussi sur `CatalinaNude` via `import_xml`. Confirmation que le pipeline est prêt pour n'importe quel personnage en une seule commande.
+    - **Workflow recommandé** :
+        1. Placer les fichiers binaires dans `import/NomDuPed`.
+        2. Lancer `PYTHONPATH=. python3 scripts/industrialize_pipeline.py`.
+        3. Exécuter le script d'import standard en pointant vers `--ped_root import_xml`.
+
+30. **Test du pipeline complet + morphs CLI (2026-10-12)** : `industrialize_pipeline.py` →
+    `import_layered_ped.py --ped-root import_xml --ped-name CatalinaNude` sur
+    `import/base/Catalina_Custom_100D.blend`, rendu vérifié.
+    - **`--morphs "bust_size=1.3,hip_width=1.15"`** : branché sur `body_morphology`
+      (`parse_slider_spec` pur + `apply_body_morphology` existant, sliders par échelle d'os).
+      Pas de shape keys : les meshes GTA importés n'en ont pas. Spec invalide → échec avant le build.
+    - **Bug 1** : `relink_external_textures` utilisait `os.walk` sans `followlinks` ; `import_xml/<ped>`
+      étant un symlink, 0 texture reliée → `followlinks=True`.
+    - **Bug 2** : Sollumz crée un placeholder `GENERATED` noir 512x512 pour chaque texture introuvable
+      à l'import (normal/spec surtout). Normal map noire = matériau entièrement noir sous Cycles.
+      `relink_external_textures` reconvertit désormais en `FILE` tout placeholder dont le nom
+      correspond à un `.dds` (contrat de test inversé en conséquence).
+    - Le `uppr/lowr_000_r` de CatalinaNude est un `*_015_r` renommé : ses shaders pointent vers
+      `*_diff_015_a_whi`, absent des assets. Idem pubis : mesh `task_001_u` livré DANS `teef_000_u`,
+      shader → `task_diff_001_a_uni` inexistant. Correction : `resolve_component_diffuse()`
+      (layered_ped_builder) applique la convention du jeu `<comp>_diff_<NNN>_<lettre>_<race>.ytd`
+      (race = `--ethnicity`, puis `uni`, puis 1re variation ; .dds = `<FileName>` du .ytd.xml) et
+      `bre.apply_diffuse_texture(..., only_missing=True)` ne comble QUE les diffuses introuvables
+      (tête/cheveux déjà résolus gardés : le comportement du jeu sur ceux-là n'est pas vérifiable hors jeu).
+      `--generic-skin-root` n'est plus nécessaire pour CatalinaNude.
+    - Sources de référence : template `import/blender/template_beachgirl5_skeleton_native.blend`
+      (squelette Beachgirl5 seul, 128 os), modèle `import/CatalinaNude/`. `import/skinTextures/CatalinaNude`
+      est un doublon octet-à-octet (`diff -rq` vide), ignoré par `industrialize_pipeline.py`.
+31. **IA → curseurs de morphologie + skinning natif via le .yft du ped (2026-10-12)** :
+    - `mcp_server/prompt_refiner.py::infer_morph_sliders(description, base_body)` : Ollama
+      (`qwen2.5:14b-instruct`, sortie JSON contrainte par schéma, température 0) traduit
+      « bonnet 80A » depuis une base « 100D » en curseurs `body_morphology`. Sortie LLM traitée
+      comme non fiable (noms inconnus ignorés, non-numérique rejeté, clamp, garde mots bloqués).
+      Pas de repli « mock » : une erreur plutôt qu'un ped inchangé. CLI :
+      `python -m mcp_server.prompt_refiner morphs --base "100D" "bonnet 80A"` → spec `--morphs`.
+      Résultat réel : `bust_size=0.8`.
+    - **Bug trouvé** : les `.ydd` sont skinnés nativement (BlendIndices/Weights) mais sans squelette ;
+      Sollumz perdait ce skinning et l'auto-weighting par chaleur échouait (« failed to find
+      solution ») → 0 poids sur tous les sommets : morphs ET animations sans effet. Correctif :
+      `<ped_root>/<ped>.yft.xml` (disposition GTA, converti par `industrialize_pipeline.py` depuis
+      `import/<ped>.yft`) passé en squelette externe Sollumz (`dwd_import_external_skeleton=SAVED`,
+      préférences utilisateur recopiées), puis `bre.bind_meshes_to_armature()` (squelette CatalinaNude
+      = Beachgirl5 : 128 os, mêmes noms/ordre/translations). Mesure : 8/8 meshes 100 % pondérés,
+      `rigged=0`. `bre.meshes_without_weights()` signale désormais tout mesh resté sans poids.
+    - **Limite du modèle** : le corps 100D custom skinne la poitrine sur `SKEL_Spine3`, sans
+      `SPR_L/R_Breast` → curseurs `bust_*` sans effet (0 sommet déplacé ; témoin `torso_bulk=0.9` :
+      5496 sommets déplacés). `apply_body_morphology` renvoie `no_effect_bones` et le pipeline
+      l'affiche. Décision utilisateur : déformation régionale (option 2), voir 32.
+
+32. **Déformation régionale de la poitrine (2026-10-12)** : repli dans `apply_body_morphology` pour
+    les os SANS poids sur le mesh (`REGIONAL_FALLBACK_RADII` : `SPR_L/R_Breast`). Même échelle
+    par axe que le curseur (axes de l'os), appliquée directement aux sommets, pleine dans 6 cm,
+    atténuée (1-t²)² jusqu'à 11 cm. Ancre tirée du MESH (`bust_region_anchor`) : apex = sommet le
+    plus avant près de l'os, ramené à la profondeur du sternum (ligne médiane, même hauteur) —
+    mesuré : l'apex du corps 100D est ~5 cm au-dessus de la tête de l'os, un ancrage sur l'os
+    sous-déformait (6 mm max). Les modèles AVEC poids SPR gardent le chemin par échelle d'os.
+    - Prompt LLM : un bonnet = un VOLUME → projection/largeur/hauteur ensemble ; `bust_size` = hauteur seule.
+    - Résultat réel « bonnet 80A » (qwen2.5:14b) : `bust_projection=0.8,bust_size=0.8,hip_depth=1.05`
+      → galbe -1 cm, sternum ≤ 7 mm, rendu face/profil sans pli. qwen ajoute `hip_depth` malgré la
+      consigne ; gemma4 donne `torso_bulk=0.8,bust_width=0.75,bust_projection=0.7,bust_size=0.75`
+      (volume ≈ 0.39×, plus réaliste D→A) mais `torso_bulk` est à éviter (voir limite).
+    - Limite connue : `torso_bulk` met à l'échelle 4 os de colonne chaînés, l'échelle se cumule et
+      se propage aux bras/tête (`torso_bulk=0.9` → sommets déplacés jusqu'à 22 cm).
+
+33. **Industrialisation du build en couches (2026-10-12)** : un seul point d'entrée, l'outil MCP
+    `build_layered_ped(ped_name, body_description="", base_body="")` : conversion
+    (`industrialize_pipeline.industrialize()`) → curseurs LLM si description → Blender
+    (`blender_runner.build_layered_ped()` → `scripts/import_layered_ped.py`), sortie
+    `workspace/<ped>/<ped>.blend` + `_preview.png`. Template dans `config/pipeline.json`
+    (`blender.layered_template_path`). Arrêt avant Blender si conversion ou inférence échoue (jamais
+    de ped inchangé pour une demande de remodelage).
+    - `industrialize_pipeline` : fonction appelable (`python -m scripts.industrialize_pipeline`),
+      lève `IndustrializeError` au lieu de seulement journaliser, reconversion si une source est plus
+      récente que le marqueur `<name>_xml/.converted` (avant : un XML existant n'était jamais régénéré).
+    - `codewalker_convert` trouve seul le CLI du repo (`tools/CodeWalkerCli/publish/`) et fixe
+      `DOTNET_ROOT=~/.dotnet` + globalisation invariante (avant : « You must install .NET » sans exports).
+    - Blender lancé avec `--python-exit-code 1` (sinon exit 0 même si le script lève) ; l'ancien
+      `.blend` est supprimé avant le run.
+    - `import/` et `import_xml/` ajoutés au `.gitignore` (assets extraits, jamais commités).
+    - Vérifié réel : 1er run 60 s (3 arbres convertis), 2e run 10 s (tout `up_to_date`), même résultat
+      que le test manuel (740 sommets déplacés, galbe -1 cm).
+
+34. **Poitrine calibrée sur mesures réelles (2026-10-12)** : les curseurs devinés par le LLM n'étaient
+    pas calibrés. CatalinaNude, déclarée « 100D », mesure 80G (sous-poitrine 80,4 cm, poitrine
+    105,7 cm). Le « 80A » de qwen (`bust_*=0.8`) n'ôtait que 1,3 cm, et même tous les curseurs à 0.6
+    n'enlevaient que 5,8 cm. Remplacé par une boucle fermée mesurée :
+    - **Mesure headless** (`body_morphology.measure_chest`) : sommets du torse (os dominant
+      `SKEL_Spine*`/`Pelvis`/`Neck`/`Clavicle`/`SPR_*`, bras exclus) ; tour = périmètre de
+      l'enveloppe convexe de la coupe horizontale (= mètre ruban tendu) ; poitrine à la hauteur
+      de l'apex, sous-poitrine au pli détecté (la face avant cesse de reculer, < 3 mm par cm).
+    - **Taille EU** (EN 13402) : bonnet = poitrine − sous-poitrine (A = 12-14 cm, +2 cm par lettre).
+      Cible = sous-poitrine MESURÉE + milieu du bonnet. Le changement de tour de dos n'est pas
+      pris en charge (`[WARN]` si le tour demandé s'écarte de plus de 2,5 cm).
+    - **Ajustement** (`fit_bust`, `--bust-size 80A`) : bissection sur l'échelle de l'excès radial
+      au-delà de la cage (profil par angle de la coupe sous-poitrine), mesurée à la hauteur d'apex
+      de base, en mémoire, puis écriture unique dans les meshes et remesure. Hors d'atteinte →
+      forme la plus proche + `[WARN]`, jamais présentée comme la taille demandée.
+      La déformation régionale autour de l'ancre (point 32) ne convenait pas : la masse s'enroule
+      sur les côtés (x = ±16 cm) et l'échelle en x/z écrasait la cage (sous-poitrine 80,4 → 72,4 cm).
+      Profil réglé sur rendus : pleine force du pli (+2 cm) à l'apex (sinon marche sous le sein),
+      atténuation sur 13 cm au-dessus (sinon bosse au-dessus du sein).
+    - **LLM** : il n'extrait plus qu'une taille (`prompt_refiner.infer_bra_size`). Une taille écrite
+      (« bonnet 80A ») est lue sans LLM ; sinon Ollama, réponse validée par `parse_bra_size`, tour
+      inventé supprimé si la description n'a pas de chiffre. `base_body` est supprimé de l'outil
+      MCP (la base est mesurée) ; ses lignes `[BUST]` sont renvoyées dans `bust_fit`.
+      `infer_morph_sliders`, `SLIDER_DESCRIPTIONS` et `format_slider_spec` sont retirés ;
+      `--morphs` reste disponible à la main.
+    - Vérifié réel : 80A → 93,5 cm (cible 93,4), 80C → 97,3 cm (cible 97,4), sous-poitrine
+      inchangée, tours aux épaules inchangés, outil MCP en 8 s. Limite : le sillon sous-mammaire
+      peint dans la diffuse et la normal map reste visible sur une petite taille.
+
+35. **Squelette de repli + renumérotation des os vanilla (2026-10-12)** : audit du pack
+    `mp_f_freemode_01_female_freemode_beach`. Aucun os ne manque, mais :
+    - Le pack n'a pas de `.yft`, et `import_layered_ped` ne cherchait que `<ped>.yft.xml`. Sans
+      lui, on retombait sur les poids automatiques (qui échouent) et le skinning natif était perdu.
+      Ajout de `--skeleton-yft` (squelette de repli, appliqué seulement si le ped n'a pas le sien ;
+      un fichier introuvable est une erreur). L'outil MCP le passe depuis
+      `blender.layered_skeleton_yft` (`import_xml/mp_f_freemode_01.yft.xml`, même squelette que le template).
+    - Ses composants déclarent une palette de 107 os (`<Unknown1 value="107"/>` = taille de la palette
+      de matrices, octet 0 de `SkeletonBinding` chez CodeWalker), en identité 0..106. Le squelette réel
+      en a 128 : 21 os `FB_*_000` en 103-123, puis `RB_Neck_1`, `SPR_L/R_Breast`, `IK_Root` en 124-127.
+      Les sommets d'indice 103 (nuque des cheveux, col de jbib, à 5,8 cm de `RB_Neck_1` et 11 cm de
+      `FB_L_Brow_Out_000`) suivaient `FB_L_Brow_Out_000` (un sourcil).
+      `layered_ped_builder.bone_group_remap()` : l'ordre des os du composant = le squelette importé
+      sans les `FB_*_000` ; si le compte ne colle pas, avertissement et aucune correction. Les poids
+      sont déplacés par `bre.remap_vertex_groups()` après l'import.
+    - Vérifié réel : le pack beach importe avec le squelette de repli ; 32 sommets de cheveux passent
+      de `FB_L_Brow_Out_000` à `RB_Neck_1`, et plus aucun poids ne reste sur un `FB_*`. CatalinaNude
+      n'est pas touché (128 = 128).
+    - Squelette vanilla CONFIRMÉ (`import/mp_f_freemode_01.yft` extrait du jeu) : nom interne
+      `pack:/mp_f_freemode_01`, md5 identique à `CatalinaNude.yft` (7f4ba909…). Le mod Catalina
+      réutilise donc le squelette vanilla renommé. Le vanilla a 128 os, `FB_*_000` compris :
+      l'hypothèse d'un « squelette vanilla à 107 os » était fausse. Le 107 est la taille de la palette
+      des composants DLC, pondérés dans l'ordre sans os de visage (107 = 128 − 21). La correction reste
+      juste géométriquement.
+    - Ouvert : la façon dont le jeu résout lui-même ces 4 emplacements n'est pas vérifiée ; le
+      résolveur prend les doublons « (n) » (`accs_000_u(3)`, `hair_000_u_2(1)`, `jbib_000_u(2)`) ; il
+      manque head/uppr/hand et les props ; aucun poids sur `SPR_*`/`SM_*`.
+
+36. **Fesses calibrées sur mesures réelles (2026-10-12)** : même méthode que la poitrine (point 34) :
+    mesure headless → cible mesurable → bissection → écriture unique → remesure.
+    - **Cible** : il n'existe pas de taille normalisée pour les fesses. On retient le repère de la
+      littérature en esthétique fessière : le rapport taille/hanches de PROFIL (profondeur
+      avant-arrière de la taille / profondeur au point de projection maximale des fesses). Chez les
+      femmes, il va d'environ 0,60 à 0,95 ; 0,70 est le profil le plus souvent jugé idéal (« Redefining
+      the Ideal Buttocks », PRS ; étude photométrique « analysis of buttocks patterns »). Les 4
+      formes sont NOTRE convention sur cette plage (`GLUTE_SHAPES`) : slim 0,85 (minces),
+      athletic 0,78 (athlétiques), round 0,70 (bombées), large 0,62 (grosses).
+      CatalinaNude mesure 0,734, soit « round ».
+    - **Mesure** (`measure_hips`) : meshes uppr+lowr, sommets dont l'os dominant est le tronc, les
+      cuisses ou `SM_*` (mains exclues). Apex = point le plus en arrière autour de `SKEL_Pelvis` ;
+      pli fessier = `fold_height` vers l'arrière ; taille = coupe la plus étroite 8 à 30 cm
+      au-dessus de l'apex.
+    - **Coupes par arêtes** (`section_xy`) pour TOUTES les mesures (poitrine comprise) : intersection
+      des arêtes du mesh avec le plan. La bande de ±6 mm de sommets attrapait 2 à 2000 sommets par
+      tranche sur le lowr, grossier. Effet sur la poitrine : sous-poitrine 81,4 au lieu de 80,4 cm,
+      toujours 80G.
+    - **Déformation commune** `excess_scale` (poitrine et fesses) : excès radial au-delà d'une paroi
+      mesurée. Pour les fesses, la paroi est la coupe de la taille (courbe lombaire) ; secteur
+      arrière, plein effet à 50°, nul à 90° (la largeur du bassin ne bouge pas) ; fondu jusqu'à la
+      taille, qui reste fixe. Fondu au-dessus du pli : 2 cm pour la poitrine, 10 cm pour les fesses
+      (avec 2 cm, une fesse agrandie débordait sur la cuisse avec une arête dentelée ; avec 6 cm, il
+      restait un pli marqué).
+    - **LLM** : `infer_body_targets` remplace `infer_bra_size` et renvoie bonnet + forme de fesses.
+      Les formulations explicites (« fesses bombées », « gros cul », « fessier rebondi »…) sont lues
+      sans LLM. Le LLM ne complète que ce qui manque, et une valeur n'est retenue que si le texte
+      mentionne cette partie du corps (il ne peut pas en ajouter). `--glutes` dans
+      `import_layered_ped` ; l'outil MCP renvoie `glutes` et `measurements` (lignes `[BUST]` et
+      `[GLUTES]`).
+    - Vérifié réel sur CatalinaNude : rapport de profil 0,85 / 0,779 / 0,701 / 0,619 pour les
+      cibles 0,85 / 0,78 / 0,70 / 0,62 ; taille fixe à 70,6 cm ; hanches 98,0 / 102,8 / 110,2 /
+      121,4 cm. Rendus de profil et de dos monotones, sans marche ni creux. Outil MCP « bonnet 80A,
+      fesses bombées » : 80A (94,4 cm) + round (0,701).
+    - Limites : seule la projection change (la largeur du bassin est fixe) ; la position de l'apex
+      (fesses hautes/basses) n'est pas pilotée ; validé uniquement sur CatalinaNude.
+
+37. **Fesses : largeur des hanches et hauteur de l'apex en proportions (2026-10-12)** : corrige les
+    deux limites du point 36.
+    - **Proportions mesurées** (littérature en esthétique fessière, mêmes sources que le point 36) :
+      1. rapport taille/hanches de profil (projection), inchangé ;
+      2. rapport taille/hanches de dos = largeur de la taille / largeur maximale des hanches entre
+         le pli fessier et le haut du sillon interfessier (plage féminine ~0,60-0,80, idéal 0,65-0,75) ;
+      3. position de l'apex = (haut du sillon − apex) / (haut du sillon − pli fessier) ; 0,5 = milieu,
+         l'idéal le plus cité (50:50).
+      Le haut du sillon (`cleft_top_height`) est la dernière hauteur où l'axe central reste ≥ 5 mm
+      derrière les fesses.
+      CatalinaNude : profil 0,734, dos 0,63, apex à 0,45.
+    - **Cibles** (notre convention) : `GLUTE_SHAPES` donne désormais (profil, dos) : slim (0,85 ; 0,78),
+      athletic (0,78 ; 0,72), round (0,70 ; 0,67), large (0,62 ; 0,60). `GLUTE_HEIGHTS` : high 0,40,
+      mid 0,50, low 0,60. Nouvel argument `--glute-height`, combinable avec `--glutes` ou seul.
+    - **Déformation par lobes** (`Lobe` + `excess_scale(..., lobes)`) : un lobe arrière (projection,
+      secteur 35-70°) et deux lobes latéraux (largeur, centrés sur les flancs, secteur 20-50°,
+      atténués sur 15 cm le long de la cuisse : il n'y a pas de pli fessier sur les côtés).
+      Là où ils se recouvrent, leurs effets sont MÉLANGÉS (moyenne pondérée), pas additionnés : en
+      les additionnant, « slim » retirait 74 % de l'excès dans la zone commune, ce qui creusait des plis
+      verticaux. Le lobe arrière couvrait d'abord 50-90° : il s'arrêtait net au niveau du pli sur les
+      flancs et laissait un rebord sur la cuisse.
+    - **Hauteur** : `vertical_shift` déplace le volume arrière vers le haut ou le bas (profil
+      `shift_bump`, nul aux bornes). Il commence 6 cm sous le pli : en gardant le pli fixe, une
+      descente de 4,5 cm tassait les tissus en bourrelet. La nouvelle hauteur du pli est calculée
+      exactement, car la redétection échoue sur une fesse étirée.
+    - **Ajustement** : descente par coordonnées (`GLUTE_FIT_ROUNDS` = 3) sur décalage → projection
+      → largeur, en remesurant entièrement l'apex à chaque tour. Le décalage fait aussi bouger le haut
+      du sillon, et les lobes de forme déplacent l'apex.
+    - Vérifié réel sur CatalinaNude :
+      slim 0,85 / 0,779 ; large 0,619 / 0,602 ; low 0,60 ; high+round 0,702 / 0,666 / 0,41 ;
+      low+large 0,624 / 0,597 / 0,59 ; high+slim 0,851 / 0,785 / 0,39. La taille reste à 70,6-70,7 cm.
+      Outil MCP « bonnet 80A, fesses bombées et hautes » : 80A + round + high en un seul build.
+      Rendus de dos, de profil et de trois-quarts : plus de plis verticaux sur slim ni de rebord sur
+      large. Les variantes low gardent un pli inférieur marqué et une base plus large : c'est
+      l'aspect « tombant » voulu, mais ce sont les moins naturelles.
+    - Limites : ne marche que sur le corps nu (uppr/lowr) ; validé uniquement sur CatalinaNude ; un
+      build fesses prend 5 à 12 s.
