@@ -28,12 +28,17 @@ _SYSTEM_PROMPT = (
 )
 
 # A hard keyword guard in addition to the system prompt: refuse to forward
-# obviously NSFW/illegal requests to the LLM at all (see
-# docs/architecture-decisions.md point 5 on Meshy/NSFW policy, which applies
-# to this local step too since it feeds the same downstream generator).
+# obviously illegal content at all (child-protection + fetish only -- NOT a
+# general NSFW/nudity filter; user decision 2026-10-12: nudity/explicit
+# content is in-scope for the local SDXL reskin path, this guard exists only
+# to hard-block child-related and fetish content regardless of destination).
+# Still shared by both consumers: refine_prompt() (feeds Meshy, an external
+# third-party API with its OWN separate SFW-only ToS this guard does NOT
+# enforce -- Meshy may still reject/moderate nudity prompts on its own) and
+# generate_ai_texture_reskin's prompt/skin_prompt (feeds the local SDXL
+# pipeline only, see mcp_server/server.py).
 _BLOCKED_KEYWORDS = (
-    "fetish", "underage", "minor", "nude", "nudity", "naked", "explicit",
-    "sexual", "sex ", "nsfw", "porn", "erotic",
+    "fetish", "underage", "minor",
 )
 
 

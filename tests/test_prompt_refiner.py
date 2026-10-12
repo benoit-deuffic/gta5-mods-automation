@@ -8,13 +8,17 @@ from mcp_server import prompt_refiner
 
 
 def test_blocked_keyword_raises_before_any_network_call(monkeypatch):
+    # Hard guard scope is strictly child-protection + fetish content, NOT
+    # general nudity/explicit content (nudity is in-scope for this pipeline,
+    # see user decision 2026-10-12 -- "ce n'en est plus une sauf les termes
+    # enfants, fetish"). Covered with "underage" instead of "nude".
     def fail_if_called(*a, **kw):
         raise AssertionError("should not reach network when blocked")
     monkeypatch.setattr(httpx, "get", fail_if_called)
     monkeypatch.setattr(httpx, "post", fail_if_called)
 
     with pytest.raises(prompt_refiner.PromptBlockedError):
-        prompt_refiner.refine_prompt("a nude character")
+        prompt_refiner.refine_prompt("an underage character")
 
 
 def test_falls_back_to_original_when_ollama_unreachable(monkeypatch):
@@ -50,6 +54,8 @@ def test_uses_real_response_when_ollama_reachable(monkeypatch):
 
 
 def test_blocked_keyword_in_llm_output_is_caught(monkeypatch):
+    # Same scope note as above: the LLM-output re-check only catches
+    # child-protection/fetish terms, not general nudity.
     monkeypatch.setattr(prompt_refiner, "is_ollama_available", lambda endpoint: True)
 
     class FakeResponse:
@@ -57,7 +63,7 @@ def test_blocked_keyword_in_llm_output_is_caught(monkeypatch):
             pass
 
         def json(self):
-            return {"response": "an explicit nude scene"}
+            return {"response": "a fetish outfit on a minor"}
 
     monkeypatch.setattr(httpx, "post", lambda *a, **kw: FakeResponse())
 
