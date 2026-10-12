@@ -933,3 +933,28 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       Rendu final confirmé : peau du corps (bras/jambes/pieds) correctement texturée (plus de
       couleur plate), seul le visage reste en placeholder magenta (texture de tête manquante du
       jeu de fichiers fourni, gap déjà documenté, sans rapport avec ce travail).
+
+24. **Bug réel de superposition visuelle trouvé et corrigé (2026-10-12)** : l'utilisateur signale
+    un rendu "bizarre" en ouvrant `templates/template_mp_f_freemode_01_nude_base.blend` dans
+    Blender — pas un artefact de script de diagnostic jetable comme supposé initialement, un vrai
+    bug du pipeline pérenne (`build_layered_ped()`).
+    - **Root cause** : l'étape "cacher le corps d'origine du template" itérait
+      `armature.children` (hiérarchie parent-enfant de l'Outliner). Mais
+      `templates/template_female_a_f_y_business_02.blend` contient ses PROPRES meshes de corps
+      pré-existants (issus d'un travail de session antérieur, gravés en dur dans ce `.blend`) qui
+      ne sont PAS enfants de l'armature, ni même liés par un modificateur Armature — inspection
+      réelle : `hash_2A94B00E.model` → parent `hash_2A94B00E` (Empty) → parent
+      `a_f_y_business_02.001` (un AUTRE Empty, pas l'armature réelle), sans AUCUN modificateur.
+      Ils ne sont donc détectables par AUCUNE relation de squelettage propre — ils se superposent
+      juste visuellement parce que c'est la même géométrie de ped à la même position.
+    - **Deux tentatives de correction insuffisantes avant la bonne** : (1) itérer
+      `armature.children` → raté (pas enfants) ; (2) vérifier modificateur Armature OU parent
+      direct → toujours raté (ni l'un ni l'autre). **Fix réel** : revenir au contrat de la
+      fonction elle-même — `template_path` ne doit JAMAIS fournir que le squelette, donc TOUT
+      mesh/empty déjà présent dans la scène AVANT les imports de ce run (déjà suivi par
+      `before_objs`, calculé plus haut dans la fonction) est forcément un résidu à masquer,
+      peu importe comment (ou si) il est lié à quoi que ce soit.
+    - **Vérifié pour de vrai** : rebuild complet → les 7 meshes fantômes de business_02 passent
+      bien à `hide_render=True`, rendu final sans dédoublement visible (confirmé par rendu réel).
+      104/104 tests toujours verts (aucun test cassé, comportement d'orchestration mocké existant
+      inchangé).

@@ -147,8 +147,32 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
     stats["textures_not_found"] = relink_result["not_found"]
 
     # Hide the template's own original body so only the new components show.
-    for obj in list(armature.children):
-        if obj not in new_meshes and obj.type in ('MESH', 'EMPTY'):
+    #
+    # PITFALL found 2026-10-12 while investigating a visually "doubled"
+    # body in templates/template_mp_f_freemode_01_nude_base.blend: TWO
+    # fixes were tried and both failed before this one.
+    #   1. Iterating `armature.children` (Outliner parent-child hierarchy)
+    #      missed meshes bound via an Armature MODIFIER with no Object
+    #      parenting.
+    #   2. Checking "has an Armature modifier pointing at `armature`, OR
+    #      is a child of `armature`" STILL missed them: inspection showed
+    #      templates/template_female_a_f_y_business_02.blend's own
+    #      pre-existing body meshes (from earlier session work, baked
+    #      permanently into that .blend) sit under a COMPLETELY SEPARATE,
+    #      disconnected parent chain (hash_X.model -> an Empty -> a
+    #      DIFFERENT empty object, "a_f_y_business_02.001" -- note the
+    #      ".001", not the real armature) with NO modifiers at all. They
+    #      just happen to visually overlap because they're the same ped's
+    #      geometry at the same position -- there is no clean programmatic
+    #      "skinned to our armature" relationship to detect at all.
+    #   Real fix: this function's contract is that `template_path` ONLY
+    #   ever contributes a skeleton, nothing else -- so ANY mesh/empty that
+    #   existed in the scene BEFORE this run's own imports (tracked by
+    #   `before_objs`, already computed above) is leftover clutter and must
+    #   always be hidden, full stop, regardless of how (or whether) it's
+    #   bound to anything.
+    for obj in before_objs:
+        if obj.type in ('MESH', 'EMPTY'):
             obj.hide_render = True
             obj.hide_set(True)
     # Hide known floor/backdrop junk (flat, large-footprint meshes -- found
