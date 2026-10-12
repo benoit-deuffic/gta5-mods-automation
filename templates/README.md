@@ -34,3 +34,12 @@ Tant que ces fichiers ne sont pas présents, le pipeline fonctionne en **mode mo
 `docs/architecture-decisions.md` point 6) : la compilation Blender est simulée et produit des
 artefacts placeholder clairement marqués comme tels, pour permettre de tester toute la chaîne
 (Tripo3D mock → Blender mock → manifeste → packaging) sans les outils réels.
+
+## Assets ped déjà extraits (composants par patch 3-niveaux)
+
+Pour un ped réel extrait à la main depuis OpenIV/CodeWalker (dossier `peds/<ped_name>/`, pas
+ce dossier `templates/`), les composants (`jbib`/`lowr`/`hand`/etc.) suivent une convention à
+3 niveaux de priorité empilés (`base/base_all/` < `base/<ped_name>/` < `<ped_name>/` racine,
+ce dernier étant toujours le rendu final in-game) — voir `docs/architecture-decisions.md`
+point 18 pour le détail complet et `scripts/layered_ped_builder.py` pour la logique de
+résolution.

@@ -692,3 +692,52 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
     passent après ce nettoyage (était 74 ; 4 tests Meshy-spécifiques
     supprimés avec `meshy_client.py`/`test_meshy_client_mock.py`, aucun autre
     test perdu, aucune fonctionnalité Tripo3D affectée).
+
+18. **Convention 3-tiers pour les assets ped extraits manuellement (`peds/<ped_name>/`,
+    2026-10-12)** : l'utilisateur ne peut pas exporter tout un `.rpf`/dlcpack depuis OpenIV ;
+    il fournit des fichiers extraits à la main (OpenIV/CodeWalker), rangés selon une
+    convention à **3 niveaux de priorité empilés** :
+    1. `base/base_all/<ped_name>/` — niveau le PLUS BAS : le catalogue complet de tous les
+       variants de chaque composant (`jbib`/`lowr`/`hand`/`feet`/`hair`/`uppr`/`accs`/`decl`/
+       `berd`/`task`, chacun avec de nombreux variants numérotés, ex. `jbib_000_u.ydd`).
+    2. `base/<ped_name>.ymt` + `base/<ped_name>/` — niveau INTERMÉDIAIRE : les overrides
+       propres à ce look DLC précis.
+    3. `<ped_name>/` (dossier racine, directement sous `peds/<nom_dossier_ped>/`) +
+       `<ped_name>.ymt` tout en haut — niveau LE PLUS HAUT, appliqué EN DERNIER : le "patch"
+       final pour ce look in-game précis.
+    Règle verbatim de l'utilisateur, qui l'a doublement insistée dans la même session :
+    **"le niveau le plus haut doit etre le rendu final dans gta"** — autrement dit, pour tout
+    code de composant présent au niveau le plus haut, ce fichier gagne TOUJOURS sur le niveau
+    intermédiaire et sur `base_all`, sans exception. À l'intérieur d'un même niveau, si
+    plusieurs variants numérotés existent pour le même composant, c'est l'index le plus bas
+    qui représente ce niveau. Implémenté dans `scripts/layered_ped_builder.py`
+    (`resolve_layered_components(ped_root, ped_name) -> dict[str, Path]`), logique pure
+    Python/pathlib, aucune dépendance `bpy` (tourne AVANT l'import Sollumz, qui a besoin de la
+    forme CodeWalker-XML `.ydd.xml` — la logique de résolution elle-même est agnostique de
+    l'extension, testée contre `.ydd` brut et `.ydd.xml`). Vérifié pour de vrai contre l'arbre
+    réel `peds/template_ped/mp_f_freemode_01_mp_f_bikerdlc_01/` (asset gitignored, présent
+    uniquement dans le checkout principal) : résolution correcte des 10 composants présents,
+    `lowr` gagné par le niveau du haut, `decl` par le niveau intermédiaire, le reste par
+    `base_all` — conforme à la règle. **Piège rencontré et désormais verrouillé par un test de
+    non-régression** : le dossier du niveau le plus haut contient lui-même un sous-dossier
+    `base/` (c'est là que vivent physiquement les niveaux intermédiaire et `base_all`) ; un
+    parcours récursif naïf (`os.walk()`/`glob("**/*")`) walkerait aussi dans `base/` et
+    traiterait à tort des fichiers des niveaux inférieurs comme s'ils appartenaient au niveau
+    du haut. Chaque niveau est donc scanné avec `Path.iterdir()` (fichiers directement dans
+    son propre dossier uniquement, jamais en récursif). 8 nouveaux tests purs (pytest,
+    `tmp_path`, zéro mock `bpy`) dans `tests/test_layered_ped_builder.py`, couvrant
+    explicitement : l'invariant central top>mid>base_all avec les 3 niveaux définissant le
+    même composant différemment, composant présent dans un seul niveau, plusieurs variants
+    dans un même niveau (index le plus bas gagne), la non-régression anti-récursion ci-dessus,
+    les noms de fichiers non conformes à la convention (ignorés avec un warning logué, pas de
+    crash), et les deux variantes d'extension (`.ydd` / `.ydd.xml`, y compris mélangées dans un
+    même niveau). Pas encore câblé dans `scripts/blender_rig_export.py` — un `TODO` explicite
+    dans `layered_ped_builder.py` pointe vers le point d'intégration naturel (nouveaux
+    arguments CLI `--layered-ped-root`/`--ped-name` alimentant l'import Sollumz à la place
+    d'un chemin de mesh unique codé en dur) ; cette tâche se limitait à rendre la logique de
+    SÉLECTION permanente et testée, pas à refaire la mécanique d'import Blender déjà prouvée
+    interactivement dans un script jetable cette même session. 76 tests passent après cet
+    ajout (était 68 réellement verts + 2 échecs préexistants sans rapport, voir
+    `tests/test_codewalker_cli_integration.py` — ces 2 tests échouent aussi sur `main` dans
+    cet environnement, binaire CodeWalker CLI réel indisponible/erreur d'exécution locale,
+    vérifié avant de commencer ce travail ; aucun test cassé par ce changement).
