@@ -282,6 +282,16 @@ def render_preview(new_meshes, out_png: str):
         light_obj = bpy.data.objects.new("preview_light", light_data)
         bpy.context.scene.collection.objects.link(light_obj)
         light_obj.rotation_euler = (0.9, 0.0, 0.6)
+    if bpy.context.scene.world is None:
+        # A scene built from bpy.ops.wm.read_factory_settings(use_empty=True)
+        # (e.g. a fresh native-skeleton template built straight from a
+        # donor's own .yft, with no pre-existing business_02-style .blend
+        # to inherit a World from) has NO World datablock at all -- found
+        # 2026-10-12 as a real crash ('NoneType' object has no attribute
+        # 'use_nodes') when building templates/template_nude_generic.blend
+        # from templates/template_beachgirl5_native.blend for the first
+        # time. Create one on demand rather than assuming it always exists.
+        bpy.context.scene.world = bpy.data.worlds.new("World")
     bpy.context.scene.world.use_nodes = True
     bg = bpy.context.scene.world.node_tree.nodes.get("Background")
     if bg:

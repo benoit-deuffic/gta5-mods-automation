@@ -1013,3 +1013,30 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       systématiquement du résidu (même logique que pour les meshes/empties), donc masqué.
     - **Vérifié pour de vrai** : rebuild complet → `hash_976FBF04`/`hash_A1286BE2` passent à
       `hide_render=True`, seule `a_f_y_business_02` reste visible. 104/104 tests toujours verts.
+
+28. **Retrait complet de `template_female_a_f_y_business_02.blend` comme fournisseur de squelette
+    (2026-10-12)** : sur demande explicite de l'utilisateur ("je ne veux plus de squelette
+    biker... utilisons l'une des bases nues"), découverte que ce n'était même plus nécessaire —
+    `Beachgirl5.yft` (comme les autres peds nus de `alt/`) contient en réalité son PROPRE
+    squelette complet et autonome (128 os, plus riche que les 104 de business_02, incluant plus
+    de détail facial/IK), importable directement via Sollumz sans rien emprunter.
+    - Nouveau template `templates/template_beachgirl5_native.blend` construit en important
+      directement `Beachgirl5.yft.xml` dans une scène vierge (`bpy.ops.wm.read_factory_settings`)
+      — ne contient QUE l'armature + le mesh "floor junk" habituel (`SKEL_ROOT`, 25 sommets,
+      déjà géré par la logique de masquage existante). Utilisé comme `--template` à la place de
+      business_02, sans aucun autre changement du pipeline.
+    - **Bug réel trouvé et corrigé** : `render_preview()` plantait
+      (`AttributeError: 'NoneType' object has no attribute 'use_nodes'`) sur ce nouveau template
+      — une scène construite depuis `read_factory_settings(use_empty=True)` n'a AUCUN datablock
+      World du tout, contrairement à un `.blend` business_02 qui en avait toujours un préexistant.
+      Fix : créer un World à la demande s'il n'existe pas.
+    - **Bénéfice collatéral inattendu, confirmé par le vrai run** : le nombre de textures non
+      trouvées chute de 18 à seulement 2 (`givemechecker`, `lowr_diff_015_a_whi`) — la plupart des
+      16 "manquantes" précédentes étaient en réalité des références de matériaux ORPHELINES des 7
+      meshes fantômes de business_02 (jamais de vrais trous dans le jeu de données fourni par
+      l'utilisateur), qui disparaissent simplement puisque ces meshes ne sont plus du tout
+      importés dans la scène.
+    - **Vérifié pour de vrai** : rebuild complet → `armature=Beachgirl5` (128 os), un seul objet
+      ARMATURE dans la scène entière (zéro fantôme/doublon business_02), 10 composants
+      importés/riggés, rendu final confirmé (silhouette propre, sans dédoublement). 104/104 tests
+      toujours verts.
