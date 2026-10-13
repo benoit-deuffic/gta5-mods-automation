@@ -16,7 +16,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from body_morphology import Deformation, Lobe, excess_scale, region_weight  # noqa: E402
-from ped_package import PackageError, package_ped, reshape_ped_xml  # noqa: E402
+import ped_package  # noqa: E402
+from ped_package import PackageError, package_ped, reshape_ped_xml, seam_report  # noqa: E402
 
 
 def deform_drawable_dictionary(root, deformations, skeleton, component="uppr"):
@@ -213,3 +214,66 @@ def test_non_skin_components_follow_the_skin_instead_of_being_reshaped():
     assert [float(c) for c in near[:3]] == pytest.approx([0.31, 0.0, 0.0])
     assert near[11:14] == ["1", "0", "0"]  # translated: normal untouched
     assert far[:3] == ["-0.5", "0", "0"]   # no skin vertex within reach
+
+
+def test_seam_report_measures_every_welded_uppr_lowr_pair():
+    uppr = [(0.0, 0.0, 0.08), (0.1, 0.0, 0.08), (0.0, 0.0, 0.3)]
+    lowr = [(0.0, 0.0, 0.08), (0.1, 0.0, 0.08), (0.0, 0.0, -0.5)]
+    moved_uppr = [(0.0, 0.0, 0.08), (0.1, 0.002, 0.08), (0.0, 0.1, 0.3)]
+    report = seam_report({"uppr_000_r.ydd": ("uppr", uppr, uppr), "uppr_001_r.ydd": ("uppr", uppr, moved_uppr),
+                          "uppr_002_r.ydd": ("uppr", [(5.0, 5.0, 5.0)], [(5.0, 5.0, 5.0)]),
+                          "lowr_000_r.ydd": ("lowr", lowr, lowr)})
+    assert report == [
+        {"uppr": "uppr_000_r.ydd", "lowr": "lowr_000_r.ydd", "shared": 2, "gap_before_mm": 0.0, "gap_after_mm": 0.0},
+        {"uppr": "uppr_001_r.ydd", "lowr": "lowr_000_r.ydd", "shared": 2, "gap_before_mm": 0.0, "gap_after_mm": 2.0},
+    ]  # uppr_002 shares no seam with lowr_000: not a pair to check
+
+
+def _fake_codewalker(monkeypatch, xml_dir):
+    """_export copies the matching .ydd.xml fixture, _convert writes the
+    reshaped tree as the 'binary' -- no codewalker-cli."""
+    def export(original, work):
+        dst = work / original.name[:-len(".ydd")] / "xml" / f"{original.name}.xml"
+        dst.parent.mkdir(parents=True)
+        dst.write_text((xml_dir / f"{original.name}.xml").read_text())
+        return dst
+
+    def convert(xml_path, tree):
+        binary = xml_path.parent / "converted.ydd"
+        tree.write(binary)
+        return binary
+    monkeypatch.setattr(ped_package, "_export", export)
+    monkeypatch.setattr(ped_package, "_convert", convert)
+
+
+def test_package_reshapes_every_skin_variant_with_its_own_deformations(tmp_path, monkeypatch):
+    xml_dir = tmp_path / "xml" / "Ped"
+    xml_dir.mkdir(parents=True)
+    src = _source(tmp_path)
+    for n in range(3):
+        (xml_dir / f"uppr_00{n}_r.ydd.xml").write_text(_YDD.format(declared=4, bone_ids="0, 1, 2, 3", breast=2, hand=3))
+        (src / "Ped" / f"uppr_00{n}_r.ydd").write_bytes(b"original")
+    _fake_codewalker(monkeypatch, xml_dir)
+    halve = Deformation(("SPR_",), (0.0, 0.0), (0.1,) * 8, ((_EVERYWHERE, 0.5),))
+    spec = json.loads(_spec(tmp_path, {"uppr": str(xml_dir / "uppr_000_r.ydd.xml")}).read_text())
+    spec["variants"] = [{"component": "uppr", "xml": str(xml_dir / "uppr_001_r.ydd.xml"),
+                         "deformations": [halve.to_dict()], "bust": None, "glutes": None, "reached": True}]
+    (tmp_path / "x.deform.json").write_text(json.dumps(spec))
+    report = package_ped(tmp_path / "x.deform.json", src, "New", tmp_path / "out")
+    assert report["reshaped"] == {"uppr_000_r.ydd": 1, "uppr_001_r.ydd": 1}
+    assert report["unreshaped_skin_variants"] == ["uppr_002_r.ydd"]  # not in the build: reported
+    assert report["variants"] == [{"file": "uppr_001_r.ydd", "bust": None, "glutes": None, "reached": True}]
+    shipped = {n: _vertices(ET.parse(tmp_path / "out" / "New" / f"{n}_r.ydd").getroot())[0][:3]
+               for n in ("uppr_000", "uppr_001")}
+    assert [float(c) for c in shipped["uppr_000"]] == pytest.approx([0.3, 0.0, 0.0])   # main: excess doubled
+    assert [float(c) for c in shipped["uppr_001"]] == pytest.approx([0.15, 0.0, 0.0])  # its own: halved
+    assert (tmp_path / "out" / "New" / "uppr_002_r.ydd").read_bytes() == b"original"
+
+
+def test_package_refuses_a_variant_that_is_not_the_peds_own_skin(tmp_path):
+    spec = json.loads(_spec(tmp_path, {}).read_text())
+    spec["variants"] = [{"component": "uppr", "xml": str(tmp_path / "elsewhere" / "uppr_001_r.ydd.xml"),
+                         "deformations": [_DOUBLE.to_dict()]}]
+    (tmp_path / "x.deform.json").write_text(json.dumps(spec))
+    with pytest.raises(PackageError, match="not one of Ped's own skin drawables"):
+        package_ped(tmp_path / "x.deform.json", _source(tmp_path), "New", tmp_path / "out")

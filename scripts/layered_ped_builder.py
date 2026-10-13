@@ -343,6 +343,65 @@ def bone_group_remap(skeleton_names: list[str], component_bone_count: int) -> di
             if skeleton_names[i] != base[i]}
 
 
+# Tokens per vertex element in a CodeWalker-XML <VertexBuffer><Data2> line.
+LAYOUT_SIZES = {"Position": 3, "BlendWeights": 4, "BlendIndices": 4, "Normal": 3,
+                "Colour0": 4, "Colour1": 4, "Tangent": 4, "Binormal": 4,
+                **{f"TexCoord{i}": 2 for i in range(8)}}
+
+
+def high_lod_positions(ydd_root: ET.Element) -> list[tuple[float, float, float]]:
+    """Vertex positions of a parsed .ydd.xml's High-LOD geometries (the LOD
+    Blender imports), in file order."""
+    out = []
+    for geometry in ydd_root.iterfind("Item/DrawableModelsHigh/Item/Geometries/Item"):
+        vb = geometry.find("VertexBuffer")
+        layout = [el.tag for el in vb.find("Layout")]
+        at = sum(LAYOUT_SIZES[tag] for tag in layout[:layout.index("Position")])
+        data = vb.find("Data2") if vb.find("Data2") is not None else vb.find("Data")
+        out += [tuple(float(t) for t in line.split()[at:at + 3]) for line in data.text.split("\n") if line.strip()]
+    return out
+
+
+def component_variants(drawable: Path) -> list[Path]:
+    """Every drawable variant of `drawable`'s component in its folder (same
+    extension), by variant index: the drawables the ped's .ymt can pick for
+    that slot (CatalinaNude: uppr_000..005, lowr_000..002 -- 'bodyshapes')."""
+    def parse(path):
+        """(component, variant index, extension) or None."""
+        ext = next((e for e in sorted(RECOGNIZED_EXTENSIONS, key=len, reverse=True)
+                    if path.name.lower().endswith(e)), None)
+        match = ext and _COMPONENT_RE.match(path.name[:-len(ext)])
+        return (match.group(1).lower(), int(match.group(2)), ext) if match else None
+
+    own = parse(drawable)
+    if own is None:
+        raise ValueError(f"not a component drawable name: {drawable.name}")
+    found = sorted((info[1], p) for p, info in ((p, parse(p)) for p in _matching_files(drawable.parent, (own[2],)))
+                   if info and info[0] == own[0])
+    return [p for _i, p in found]
+
+
+def skin_variant_combos(variants: dict[str, list], seamed) -> list[dict]:
+    """Which uppr/lowr pairs to build so every skin variant is fitted once.
+    `variants` = {"uppr": [...], "lowr": [...]} (by variant index, the
+    lowest first); `seamed(uppr, lowr)` -> True if the two meshes share
+    their waist seam (welded vertices). The first combo is the lowest pair
+    (the main build); then every other variant once, paired with the lowest
+    variant of the other component it shares a seam with -- or the lowest
+    one if none does. Pairs found from both sides appear once."""
+    combos = [{"uppr": variants["uppr"][0], "lowr": variants["lowr"][0]}]
+    for component, other in (("uppr", "lowr"), ("lowr", "uppr")):
+        for variant in variants[component][1:]:
+            def shares(candidate):
+                pair = {component: variant, other: candidate}
+                return seamed(pair["uppr"], pair["lowr"])
+            partner = next((c for c in variants[other] if shares(c)), variants[other][0])
+            combo = {component: variant, other: partner}
+            if combo not in combos:
+                combos.append(combo)
+    return combos
+
+
 # TODO(integration): wire resolve_layered_components() into the pipeline step
 # that runs just before Sollumz import, e.g. a new --layered-ped-root /
 # --ped-name pair of CLI args on scripts/blender_rig_export.py's main(), or a

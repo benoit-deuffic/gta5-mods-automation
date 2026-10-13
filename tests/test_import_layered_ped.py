@@ -24,6 +24,10 @@ class FakeObject:
         self.type = obj_type
         self.hide_render = False
         self._hidden = False
+        self.props = {}  # bpy ID properties (obj["key"] = value)
+
+    def __setitem__(self, key, value):
+        self.props[key] = value
 
     def hide_set(self, value):
         self._hidden = value
@@ -126,6 +130,16 @@ def test_build_layered_ped_imports_each_resolved_component_once(
     assert relink_calls == [str(ped_root)]
     assert stats["textures_relinked"] == 1
     assert stats["textures_not_found"] == ["b"]
+    # each mesh is tagged with the component of the file it came from: the
+    # body fits find the skin by it (a material name can miss it)
+    assert sorted(o.props["ped_component"] for o in stats["new_meshes"]) == ["jbib", "lowr"]
+
+    other = ped_root / ped_name / "lowr_001_r.ydd.xml"
+    other.write_text((ped_root / ped_name / "lowr_000_r.ydd.xml").read_text())
+    fake_bpy_module.data.objects.clear()  # what the real open_mainfile does
+    stats = module.build_layered_ped("fake_template.blend", str(ped_root), ped_name,
+                                     component_files={"lowr": other})
+    assert stats["resolved_components"]["lowr"] == str(other)
 
 
 def test_build_layered_ped_reports_missing_armature_without_crashing(

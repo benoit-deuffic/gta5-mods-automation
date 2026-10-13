@@ -12,7 +12,7 @@ from scripts.body_morphology import (
     GLUTE_HEIGHTS, GLUTE_SHAPES, Lobe, bra_band_mismatch, bra_size_label, bust_target_cm,
     cleft_top_height, excess_scale, fit_monotonic, follow_skin, mound_contract, widen_torso, fold_height, glute_height_label, glute_shape_label,
     hull_perimeter, parse_bra_size, section_xy, slice_circumference, slice_depth, slice_extent,
-    shift_bump, vertical_shift, wall_profile, glute_targets_reached, _glute_lobes,
+    shift_bump, vertical_shift, wall_profile, glute_targets_missed, _glute_lobes,
 )
 
 
@@ -236,11 +236,11 @@ def test_only_enlarging_fades_in_above_the_fold():
 def test_glute_targets_are_judged_on_the_final_measurement():
     targets = {"apex_position": 0.6, "lateral_whr": 0.85, "posterior_whr": 0.78}
     good = {"apex_position": 0.62, "lateral_whr": 0.846, "posterior_whr": 0.785}  # rounded, on the edges
-    assert glute_targets_reached(good, targets)
-    assert not glute_targets_reached({**good, "apex_position": 0.82}, targets)    # the slim+low defect
-    assert not glute_targets_reached({**good, "posterior_whr": 0.787}, targets)
-    assert not glute_targets_reached(None, targets)
-    assert glute_targets_reached({"apex_position": 0.45}, {})                     # nothing asked
+    assert not glute_targets_missed(good, targets)
+    assert glute_targets_missed({**good, "apex_position": 0.82}, targets)    # the slim+low defect
+    assert glute_targets_missed({**good, "posterior_whr": 0.787}, targets)
+    assert glute_targets_missed(None, targets)
+    assert not glute_targets_missed({"apex_position": 0.45}, {})                     # nothing asked
 
 
 def test_zero_fold_fade_leaves_everything_below_the_fold_alone():
