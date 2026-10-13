@@ -111,14 +111,17 @@ def build_layered_ped(template_path: Path, ped_root: Path, ped_name: str, output
                       glute_height: str | None = None,
                       preview_png: Path | None = None,
                       skeleton_yft: Path | None = None,
+                      deformation_out: Path | None = None,
                       timeout_s: int = 900) -> LayeredBuildResult:
     """Run scripts/import_layered_ped.py headless: layered component
     resolution + Sollumz import (native skinning via <ped_root>/<ped>.yft.xml,
     else `skeleton_yft`, which must match the template's skeleton)
     + texture fixes + optional bust fit to an EU bra size and glute fit to a
     GLUTE_SHAPES shape / GLUTE_HEIGHTS height (measured on the mesh,
-    body_morphology.fit_bust / fit_glutes). No mock fallback -- unlike compile_ped
-    there is no meaningful placeholder for a .blend."""
+    body_morphology.fit_bust / fit_glutes). `deformation_out` also writes the
+    fits as data (+ every body variant) for scripts/ped_package.py; the build
+    then only counts as built if that file was written too. No mock fallback
+    -- unlike compile_ped there is no meaningful placeholder for a .blend."""
     blender_path = _resolve_blender_path()
     if not blender_path:
         return LayeredBuildResult(status="error", output_blend=output_blend,
@@ -144,6 +147,9 @@ def build_layered_ped(template_path: Path, ped_root: Path, ped_name: str, output
         cmd += ["--skeleton-yft", str(skeleton_yft)]
     if preview_png:
         cmd += ["--preview-png", str(preview_png)]
+    if deformation_out:
+        cmd += ["--deformation-out", str(deformation_out)]
+        deformation_out.unlink(missing_ok=True)
     output_blend.parent.mkdir(parents=True, exist_ok=True)
     output_blend.unlink(missing_ok=True)  # a previous run's file must not pass for this one's
     try:
@@ -155,7 +161,7 @@ def build_layered_ped(template_path: Path, ped_root: Path, ped_name: str, output
     measurements = [line for line in proc.stdout.splitlines() if line.startswith(("[BUST]", "[GLUTES]"))]
     # --python-exit-code makes a Python exception in the script a nonzero exit
     # (Blender exits 0 by default even then).
-    ok = proc.returncode == 0 and output_blend.exists()
+    ok = proc.returncode == 0 and output_blend.exists() and (deformation_out is None or deformation_out.exists())
     return LayeredBuildResult(status="built" if ok else "error", output_blend=output_blend,
                               preview_png=preview_png if preview_png and preview_png.exists() else None,
                               warnings=warnings, measurements=measurements,

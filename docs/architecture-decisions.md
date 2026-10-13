@@ -1501,3 +1501,53 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
     - Limites : round + low et large + low atteignent la butée de décalage (−6 cm) à 0,59 ; les
       variantes low gardent un pli inférieur marqué (point 37) ; validé uniquement sur
       CatalinaNude.
+
+44. **Paquet OpenIV (.oiv) pour PedSelector (2026-10-13)** : `scripts/oiv_package.py --ped-dir dist
+    --name <ped> --out dist [--icon <png>]` emballe la sortie de `ped_package.py` (`<ped>.yft`,
+    `<ped>.ymt`, `<ped>/`) dans `<ped>.oiv` (zip : `assembly.xml`, `icon.png`, `content/`).
+    - Cible relevée sur le pack installé de l'utilisateur (Alexandra, Camille) et sur
+      `PedSelector.oiv` : `update\x64\dlcpacks\pedselector\dlc.rpf` > `peds.rpf` > fichiers du ped.
+      Ajout par deux `<archive>` imbriqués, `createIfNotExist="False"` : PedSelector doit déjà être
+      installé (c'est lui qui inscrit le pack dans `dlclist.xml`), le paquet ne crée jamais de pack
+      à moitié. `id` dérivé du nom (uuid5) : un paquet régénéré reste le même paquet pour OpenIV.
+    - Hors périmètre : l'entrée `ap_m.xml` (Documents, hors dossier du jeu) — PedSelector ou
+      `xml_manifest_updater.py`, qui écrit `PoseMatcherName` = Male/Male_prone pour les deux genres
+      (Female/Female_prone fait planter le jeu au lancement). Entrées existantes inchangées.
+    - Format : spécification officielle OIV 2.2 (github.com/OpenIV-Team/OpenIV-PackageFormat,
+      `specification/versions/2.2.md`). `description` doit être un nœud CDATA (en texte brut,
+      OpenIV a refusé le premier paquet : « The metadata information is missed or corrupted »,
+      cause probable, à confirmer à la réinstallation) et `icon.png` doit
+      faire exactement 128x128 px ; le script vérifie les deux. Les `<archive>` imbriqués ont un
+      chemin relatif à l'archive parente (exemple officiel `x64e.rpf` > `levels\gta5\vehicles.rpf`).
+    - Vérifié : Camille.oiv contient les 104 fichiers de `dist/` à l'octet près. Installation par
+      l'OpenIV Package Installer non encore testée.
+    - **Industrialisé** : outil MCP `package_layered_ped(ped_name, new_name, body_description)` =
+      `build_layered_ped` (avec `--deformation-out`, donc toutes les variantes) → `ped_package` →
+      `oiv_package` (icône unie par défaut). Refuse un nom déjà présent dans `dist/` avant de lancer
+      Blender. `[WARN]` du build et du paquet remontés dans `warnings`.
+    - Validé de bout en bout sur Eva (`bonnet 75C, fesses minces`, tirage au hasard) : 75C
+      (74,9 / 92,0 cm), fesses 0,846 / 0,776 (cibles 0,85 / 0,78), 11 coutures fermées, `.oiv` =
+      104 fichiers identiques à `dist/`. Une variante (`uppr_001`/`004`) rate les fesses de 0,012
+      (même limite que Camille : la bande propre à chaque variante déplace la taille).
+    - **Mise à jour d'un ped livré** : outil MCP `update_packaged_ped(name, body_description)`. Le
+      fichier de déformation enregistre maintenant la demande (`targets` : bonnet, forme et hauteur
+      des fesses) ; seules les cibles nommées dans la description changent, les autres sont
+      reprises. Le ped est reconstruit depuis son ped SOURCE (`ped_name` du fichier), jamais en
+      redéformant le ped livré (les déformations se cumuleraient). Build, paquet et `.oiv` se font
+      dans des dossiers temporaires et ne remplacent `dist/<name>*` et `workspace/<name>/` qu'après
+      un succès complet : une mise à jour ratée laisse l'ancien ped intact (testé).
+      `package_layered_ped` passe par le même chemin. Eva (construite avant) : `targets` ajoutées à
+      la main d'après son résultat de build (75C, slim).
+    - Validé : Eva 75C → 95C (« bonnet 95C ») : 95,0 / 111,9 cm (~95C), fesses slim gardées
+      0,849 / 0,781, toutes les variantes dans les cibles, 11 coutures fermées, `.oiv` = 104 fichiers
+      identiques à `dist/`, plus aucun dossier temporaire.
+    - **Inscription dans `ap_m.xml`** : jusqu'ici le pipeline n'écrivait que `workspace/ap_m.xml`
+      (ancien outil `sync_usermods_manifest`), jamais celui du jeu ; Camille y avait été ajoutée à
+      la main. `package_layered_ped` et `update_packaged_ped` inscrivent maintenant le ped dans
+      `UserMods/ap_m.xml` (config `usermods_ap_m_xml`, via `/mnt/c/...`) avec
+      `xml_manifest_updater.register_ped` : copie de sauvegarde `ap_m.xml.bak-<horodatage>` avant
+      écriture ; une entrée existante n'est jamais réécrite (« already registered »). Aussi en
+      ligne de commande : `python scripts/xml_manifest_updater.py --manifest <ap_m.xml> --name <ped>`.
+      Vérifié sur le vrai fichier (Eva) : les 10 entrées existantes sont inchangées, seule la
+      déclaration XML passe de guillemets doubles à simples ; l'entrée d'Eva est identique champ
+      par champ à celle de Camille écrite par PedSelector, au nom près.

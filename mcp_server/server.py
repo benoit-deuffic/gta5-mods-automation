@@ -15,13 +15,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from mcp_server import ai_reskin_runner, blender_runner, prompt_refiner, validator
 from mcp_server.text3d_backend import get_backend
-from scripts import codewalker_convert, industrialize_pipeline, package_builder, xml_manifest_updater, ymt_builder
+from scripts import (codewalker_convert, industrialize_pipeline, oiv_package, package_builder, ped_package,
+                     xml_manifest_updater, ymt_builder)
 
 mcp = FastMCP("gtav-ped-mcp")
 
@@ -211,29 +215,160 @@ def build_layered_ped(ped_name: str, body_description: str = "") -> dict:
     reshape request. `measurements` holds the measured before/after lines.
     """
     try:
+        targets = _infer_targets(body_description)
+    except prompt_refiner.PromptRefinerError as exc:
+        return {"ped_name": ped_name, "status": "error", "error": f"body target extraction: {exc}"}
+    return _build_layered(ped_name, targets, WORKSPACE_DIR / ped_name, ped_name)
+
+
+@mcp.tool()
+def package_layered_ped(ped_name: str, new_name: str, body_description: str = "") -> dict:
+    """Build, reshape and ship a ped as a new ped `new_name`, ready to install:
+    build_layered_ped's chain (with every body variant fitted) ->
+    scripts/ped_package.py (original binaries renamed, only the reshaped .ydd
+    regenerated, on every LOD) -> scripts/oiv_package.py (OpenIV package
+    adding the files into dlcpacks/pedselector/dlc.rpf/peds.rpf).
+
+    Output in DELIVERY_OUTPUT_DIR: `<new_name>.yft`, `<new_name>.ymt`,
+    `<new_name>/` and `<new_name>.oiv`, and workspace/<new_name>/ (.blend,
+    preview, deformation record); never overwrites an existing ped (checked
+    before Blender runs; use update_packaged_ped for that). Still to do by
+    hand: install the .oiv with OpenIV's Package Installer (mods folder) and
+    register `new_name` in UserMods/ap_m.xml (PedSelector, Streamed = true).
+    `report` lists every reshaped file, variant measurements and seam checks
+    ([WARN] = a variant misses its targets or a seam opened).
+    """
+    try:
+        ped_package.check_output(new_name, DELIVERY_OUTPUT_DIR)
+        targets = _infer_targets(body_description)
+    except (ped_package.PackageError, prompt_refiner.PromptRefinerError) as exc:
+        return {"ped_name": ped_name, "new_name": new_name, "status": "error", "error": str(exc)}
+    return _ship(ped_name, new_name, targets)
+
+
+@mcp.tool()
+def update_packaged_ped(name: str, body_description: str) -> dict:
+    """Change the body of a ped already shipped by package_layered_ped, e.g.
+    ("Eva", "bonnet 95C"): only the targets the description names change,
+    the others are kept from the ped's recorded request
+    (workspace/<name>/<name>_deformation.json). The ped is rebuilt from its
+    ORIGINAL source ped (never by reshaping the shipped one again, which would
+    compound deformations), staged, and only replaces dist/<name>* and
+    workspace/<name>/ once the whole build + package succeeded -- a failed
+    update leaves the previous ped untouched. Reinstall the new .oiv over the
+    old one (same package id, OpenIV `add` replaces the files); ap_m.xml is
+    unchanged.
+    """
+    record_path = WORKSPACE_DIR / name / f"{name}_deformation.json"
+    try:
+        record = json.loads(record_path.read_text())
+        previous = record["targets"]
+        requested = _infer_targets(body_description)
+    except (OSError, ValueError, KeyError) as exc:
+        return {"new_name": name, "status": "error",
+                "error": f"no recorded build for {name} ({record_path}): {exc!r}"}
+    except prompt_refiner.PromptRefinerError as exc:
+        return {"new_name": name, "status": "error", "error": f"body target extraction: {exc}"}
+    targets = prompt_refiner.BodyTargets(
+        bra_size=requested.bra_size or previous["bra_size"],
+        glutes=requested.glutes or previous["glutes"],
+        glute_height=requested.glute_height or previous["glute_height"],
+        model=requested.model)
+    return {**_ship(record["ped_name"], name, targets), "previous_targets": previous}
+
+
+def _infer_targets(body_description: str) -> prompt_refiner.BodyTargets | None:
+    return prompt_refiner.infer_body_targets(body_description) if body_description else None
+
+
+def _ship(ped_name: str, name: str, targets) -> dict:
+    """Build + package + .oiv into staging dirs, then publish them over
+    workspace/<name>/ and dist/<name>*. Nothing published is touched unless
+    every step succeeded."""
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    DELIVERY_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(dir=WORKSPACE_DIR, prefix=f".{name}."))
+    staged = Path(tempfile.mkdtemp(dir=DELIVERY_OUTPUT_DIR, prefix=f".{name}."))
+    try:
+        deformation = work / f"{name}_deformation.json"
+        build = _build_layered(ped_name, targets, work, name, deformation_out=deformation)
+        result = {**build, "new_name": name}
+        if build["status"] != "built":
+            return result
+        try:
+            report = ped_package.package_ped(deformation, industrialize_pipeline.IMPORT_DIR, name, staged)
+            oiv_package.build_oiv(staged, name, staged)
+        except (ped_package.PackageError, oiv_package.OivError) as exc:
+            return {**result, "status": "error", "error": f"packaging: {exc}"}
+        for entry in (f"{name}.yft", f"{name}.ymt", name, f"{name}.oiv"):
+            _publish(staged / entry, DELIVERY_OUTPUT_DIR / entry)
+        _publish(work, WORKSPACE_DIR / name)
+        lines = [line.replace(str(staged), str(DELIVERY_OUTPUT_DIR)) for line in ped_package.report_lines(report)]
+        registration = _register(name)
+        return {**result, "status": "packaged", "registration": registration,
+                "output_blend": str(WORKSPACE_DIR / name / f"{name}.blend"),
+                "preview_png": str(WORKSPACE_DIR / name / f"{name}_preview.png") if build["preview_png"] else None,
+                "oiv": str(DELIVERY_OUTPUT_DIR / f"{name}.oiv"),
+                "files": [str(DELIVERY_OUTPUT_DIR / Path(f).name) for f in report["output"]],
+                "report": lines,
+                "warnings": build["warnings"] + [line for line in lines if line.startswith("[WARN]")]}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+def _register(name: str) -> str:
+    """Add the shipped (streamed) ped to the game's UserMods/ap_m.xml
+    (config `usermods_ap_m_xml`); an existing entry is never rewritten."""
+    manifest = _CONFIG.get("usermods_ap_m_xml")
+    if not manifest:
+        return "skipped: no usermods_ap_m_xml in config/pipeline.json"
+    if not Path(manifest).parent.is_dir():
+        return f"skipped: UserMods folder not found ({Path(manifest).parent})"
+    try:
+        return f"{xml_manifest_updater.register_ped(Path(manifest), name)} in {manifest}"
+    except (OSError, ValueError, ET.ParseError) as exc:  # ManifestError / defusedxml errors are ValueErrors
+        return f"error: {exc}"
+
+
+def _publish(staged: Path, dest: Path) -> None:
+    """Move `staged` to `dest`, replacing it; the old one is removed only
+    after the new one is in place."""
+    old = dest.with_name(f".{dest.name}.old")
+    _remove(old)
+    if dest.exists():
+        dest.rename(old)
+    staged.rename(dest)
+    _remove(old)
+
+
+def _remove(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _build_layered(ped_name: str, targets, out_dir: Path, stem: str,
+                   deformation_out: Path | None = None) -> dict:
+    """build_layered_ped's chain, writing <out_dir>/<stem>.blend (+ preview)."""
+    try:
         conversion = industrialize_pipeline.industrialize()
     except industrialize_pipeline.IndustrializeError as exc:
         return {"ped_name": ped_name, "status": "error", "error": f"conversion: {exc}"}
 
-    targets = None
-    if body_description:
-        try:
-            targets = prompt_refiner.infer_body_targets(body_description)
-        except prompt_refiner.PromptRefinerError as exc:
-            return {"ped_name": ped_name, "status": "error", "error": f"body target extraction: {exc}"}
-
     blender_cfg = _CONFIG.get("blender", {})
-    out_dir = WORKSPACE_DIR / ped_name
     result = blender_runner.build_layered_ped(
         template_path=PROJECT_ROOT / blender_cfg["layered_template_path"],
         skeleton_yft=PROJECT_ROOT / blender_cfg["layered_skeleton_yft"],
         ped_root=industrialize_pipeline.IMPORT_XML_DIR,
         ped_name=ped_name,
-        output_blend=out_dir / f"{ped_name}.blend",
+        output_blend=out_dir / f"{stem}.blend",
         bust_size=targets.bra_size if targets else None,
         glutes=targets.glutes if targets else None,
         glute_height=targets.glute_height if targets else None,
-        preview_png=out_dir / f"{ped_name}_preview.png",
+        preview_png=out_dir / f"{stem}_preview.png",
+        deformation_out=deformation_out,
         timeout_s=blender_cfg.get("layered_timeout_seconds", 900),
     )
     return {

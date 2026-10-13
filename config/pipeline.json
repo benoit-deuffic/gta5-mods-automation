@@ -39,5 +39,6 @@
     "min_fbx_bytes": 20000,
     "min_texture_bytes": 5000,
     "require_power_of_two_textures": true
-  }
+  },
+  "usermods_ap_m_xml": "/mnt/c/Users/benoit/Documents/Rockstar Games/GTA V/UserMods/ap_m.xml"
 }

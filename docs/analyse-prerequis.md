@@ -71,7 +71,9 @@ dépôt Sollumz v2.9.0, dépôt CodeWalker (CodeWalker.Core), pages AddonPeds / 
 
 ### 2.3 Manifeste ap_m.xml (§7)
 - `defusedxml` déclaré mais parse via `xml.etree` non sécurisé.
-- Gabarit "female" incohérent : `PoseMatcherName=Male`, `PoseMatcherProneName=Male_prone`.
+- ~~Gabarit "female" incohérent : `PoseMatcherName=Male`~~ — faux constat : `Male` / `Male_prone`
+  est la bonne valeur pour les deux sexes. `Female` / `Female_prone` n'existe pas dans le jeu,
+  qui plante au lancement (testé en jeu le 2026-10-13).
 - `IsStreamedGfx` codé en dur à `false` alors que `register_usermods_entry` a `streamed_gfx=true`
   par défaut. La disposition de fichiers décrite (1 `.ydd` + 1 `.ytd`) correspond à un ped
   **non streamé** → `false` est la bonne valeur ; le défaut `true` est faux.

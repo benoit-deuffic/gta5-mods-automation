@@ -651,6 +651,8 @@ def main():
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({
             "ped_root": os.path.abspath(args.ped_root), "ped_name": args.ped_name,
+            # the request itself, so a later update can change one target and keep the others
+            "targets": {"bra_size": args.bust_size, "glutes": args.glutes, "glute_height": args.glute_height},
             "skeleton_yft": stats["skeleton_yft"] and os.path.abspath(stats["skeleton_yft"]),
             "components": {c: os.path.abspath(p) for c, p in stats["resolved_components"].items()},
             "deformations": [d.to_dict() for d in deformations],

@@ -302,9 +302,18 @@ def seam_report(skin_points: dict) -> list[dict]:
     return out
 
 
-def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> dict:
+def check_output(name: str, out: Path) -> None:
+    """Raise PackageError if `name` is invalid or its files already exist in
+    `out` (callers run this before an expensive build, package_ped again)."""
     if not PED_NAME_RE.match(name):
         raise PackageError(f"invalid ped name {name!r}: letters, digits and _ only")
+    existing = [str(p) for p in (out / f"{name}.yft", out / f"{name}.ymt", out / name) if p.exists()]
+    if existing:
+        raise PackageError(f"output already exists, not overwriting: {existing}")
+
+
+def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> dict:
+    check_output(name, out)
     spec = json.loads(deformation_json.read_text())
     ped = spec["ped_name"]
     deformations = [Deformation.from_dict(d) for d in spec["deformations"]]
@@ -314,9 +323,6 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
     if missing:
         raise PackageError(f"original binaries missing: {missing}")
     targets = [out / f"{name}.yft", out / f"{name}.ymt", out / name]
-    existing = [str(p) for p in targets if p.exists()]
-    if existing:
-        raise PackageError(f"output already exists, not overwriting: {existing}")
     if deformations and not spec.get("skeleton_yft"):
         raise PackageError("the build had no skeleton .yft: skin weights unknown, can't replay the reshape")
     skeleton_names = skeleton_bone_names(Path(spec["skeleton_yft"])) if deformations else []
@@ -402,6 +408,32 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
             "seams": seam_report(skin_points)}
 
 
+def report_lines(report: dict) -> list[str]:
+    """package_ped's report as [OK]/[INFO]/[WARN] lines (CLI and MCP tool)."""
+    lines = [f"[OK] reshaped {file_name}: {moved} vertices (all LODs)"
+             for file_name, moved in report["reshaped"].items()]
+    lines.append(f"[INFO] unchanged components (original binaries): {report['unchanged_components']}")
+    for v in report["variants"]:
+        bust, glutes = v.get("bust"), v.get("glutes")
+        line = (f"bust {bust['underbust_cm']}/{bust['bust_cm']} cm (~{bust['size']}, target {bust['target_bust_cm']})"
+                if bust else "")
+        if glutes:
+            r = glutes["result"]
+            line += (f"; glutes ({glutes['how']}) " + (f"lateral {r['lateral_whr']} posterior {r['posterior_whr']} "
+                                                      f"apex {r['apex_position']}" if r else "not measurable")
+                     + f", targets {glutes['targets']}")
+        lines.append(f"[{'OK' if v['reached'] else 'WARN'}] variant {v['file']} (measured in the build): {line}")
+    if report["unreshaped_skin_variants"]:
+        lines.append(f"[WARN] skin variants shipped UNRESHAPED (original body in game): "
+                     f"{report['unreshaped_skin_variants']}")
+    for seam in report["seams"]:
+        opened = seam["gap_after_mm"] - seam["gap_before_mm"] > SEAM_OPEN_MM
+        lines.append(f"[{'WARN' if opened else 'OK'}] seam {seam['uppr']} / {seam['lowr']}: {seam['shared']} welded "
+                     f"vertices, max gap {seam['gap_before_mm']} -> {seam['gap_after_mm']} mm")
+    lines.append(f"[OK] {', '.join(report['output'])}")
+    return lines
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Assemble a reshaped ped's streamed files (AddonPeds/PedSelector)")
     parser.add_argument("--deformation", required=True, type=Path,
@@ -416,26 +448,7 @@ def main(argv=None) -> int:
     except PackageError as exc:
         print(f"[FAIL] {exc}")
         return 1
-    for file_name, moved in report["reshaped"].items():
-        print(f"[OK] reshaped {file_name}: {moved} vertices (all LODs)")
-    print(f"[INFO] unchanged components (original binaries): {report['unchanged_components']}")
-    for v in report["variants"]:
-        bust, glutes = v.get("bust"), v.get("glutes")
-        line = (f"bust {bust['underbust_cm']}/{bust['bust_cm']} cm (~{bust['size']}, target {bust['target_bust_cm']})"
-                if bust else "")
-        if glutes:
-            r = glutes["result"]
-            line += (f"; glutes ({glutes['how']}) " + (f"lateral {r['lateral_whr']} posterior {r['posterior_whr']} "
-                                                      f"apex {r['apex_position']}" if r else "not measurable")
-                     + f", targets {glutes['targets']}")
-        print(f"[{'OK' if v['reached'] else 'WARN'}] variant {v['file']} (measured in the build): {line}")
-    if report["unreshaped_skin_variants"]:
-        print(f"[WARN] skin variants shipped UNRESHAPED (original body in game): {report['unreshaped_skin_variants']}")
-    for seam in report["seams"]:
-        opened = seam["gap_after_mm"] - seam["gap_before_mm"] > SEAM_OPEN_MM
-        print(f"[{'WARN' if opened else 'OK'}] seam {seam['uppr']} / {seam['lowr']}: {seam['shared']} welded vertices, "
-              f"max gap {seam['gap_before_mm']} -> {seam['gap_after_mm']} mm")
-    print(f"[OK] {', '.join(report['output'])}")
+    print("\n".join(report_lines(report)))
     return 0
 
 

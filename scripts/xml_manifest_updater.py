@@ -4,14 +4,21 @@ Corrections vs the original spec (see docs/analyse-prerequis.md §2.3):
 - Uses defusedxml for parsing (untrusted/compat XML) instead of raw xml.etree.
 - IsStreamedGfx is derived from the actual delivery layout, not hard-coded "false"
   while a different default sneaks in elsewhere.
-- Gender-specific fields (clipsets, pose matcher, capsule, expression set...) are
-  derived from the `gender` argument instead of being hard-coded to female values
-  regardless of ped gender (spec bug: PoseMatcherName="Male" under a "female" template).
+- Gender-specific fields (clipsets, capsule, expression set...) are derived from
+  the `gender` argument instead of being hard-coded to female values.
+- PoseMatcherName/PoseMatcherProneName are "Male"/"Male_prone" for BOTH genders:
+  that is what the game knows (vanilla female peds use them too, PedSelector
+  writes them). "Female"/"Female_prone" are not known pose matchers -- tested
+  in game by the user 2026-10-13: the game crashes at launch.
 - Field order matches CodeWalker's CPedModelInfo__InitData (GameFiles/FileTypes/PedsFile.cs).
 """
 from __future__ import annotations
 
+import argparse
+import shutil
+import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from defusedxml import ElementTree as DefusedET
@@ -29,8 +36,8 @@ _GENDER_DEFAULTS = {
         gesture_group="ANIM_GROUP_GESTURE_F_GENERIC",
         facial_clipset_group="facial_clipset_group_gen_female",
         viseme_clipset="ANIM_GROUP_VISEMES_F_LO",
-        pose_matcher="Female",
-        pose_matcher_prone="Female_prone",
+        pose_matcher="Male",  # not "Female": unknown to the game, crashes at launch
+        pose_matcher_prone="Male_prone",
         capsule="STANDARD_FEMALE",
         radio1="RADIO_GENRE_PUNK",
         radio2="RADIO_GENRE_JAZZ",
@@ -178,6 +185,21 @@ def add_ped_to_manifest(xml_path: Path, model_name: str, gender: str = "female",
     return True
 
 
+def register_ped(xml_path: Path, model_name: str, gender: str = "female", is_streamed_gfx: bool = True) -> str:
+    """Register a ped in the user's live ap_m.xml (Documents/Rockstar
+    Games/GTA V/UserMods). An existing entry is left exactly as it is (the
+    user or PedSelector may have edited it) -> "already registered". Otherwise
+    the file is first backed up next to itself (`ap_m.xml.bak-<timestamp>`,
+    like PedSelector does) and the entry appended -> "registered"."""
+    if model_name in list_registered_peds(xml_path):
+        return "already registered"
+    if xml_path.exists():
+        backup = xml_path.with_name(f"{xml_path.name}.bak-{datetime.now():%Y%m%d-%H%M%S}")
+        shutil.copy2(xml_path, backup)
+    add_ped_to_manifest(xml_path, model_name, gender=gender, is_streamed_gfx=is_streamed_gfx)
+    return "registered"
+
+
 def list_registered_peds(xml_path: Path) -> list[str]:
     if not xml_path.exists():
         return []
@@ -191,3 +213,18 @@ def list_registered_peds(xml_path: Path) -> list[str]:
         if name_node is not None and name_node.text:
             names.append(name_node.text)
     return names
+
+
+def main(argv=None) -> int:
+    """`python scripts/xml_manifest_updater.py --manifest "/mnt/c/Users/<u>/Documents/Rockstar Games/GTA V/UserMods/ap_m.xml" --name Eva`"""
+    parser = argparse.ArgumentParser(description="Register a streamed ped in UserMods/ap_m.xml (backup first)")
+    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--gender", default="female", choices=sorted(_GENDER_DEFAULTS))
+    args = parser.parse_args(argv)
+    print(f"[OK] {args.name}: {register_ped(args.manifest, args.name, gender=args.gender)} in {args.manifest}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

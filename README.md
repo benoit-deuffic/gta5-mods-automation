@@ -68,6 +68,16 @@ mcp_servers:
 5. `build_delivery_package(target_name)` — construit
    `dist/<target_name>_delivery.zip` (AddonPeds/PedSelector + dlcpack autonome,
    avec README_INSTALL.txt dans chaque dossier).
+6. `build_layered_ped(ped_name, body_description)` — ped de `import/` remodelé
+   (poitrine, fesses) d'après une description, en `.blend` + aperçu.
+7. `package_layered_ped(ped_name, new_name, body_description)` — chaîne
+   complète : remodelage de toutes les variantes, `dist/<new_name>.yft/.ymt/<new_name>/`
+   (`scripts/ped_package.py`) et `dist/<new_name>.oiv` pour PedSelector
+   (`scripts/oiv_package.py`), puis inscription dans `UserMods/ap_m.xml` (sauvegarde
+   avant écriture, entrée existante jamais modifiée). Reste manuel : installation OpenIV.
+8. `update_packaged_ped(name, body_description)` — change le corps d'un ped déjà
+   livré (ex. `"Eva", "bonnet 95C"`) : seules les cibles nommées changent,
+   reconstruit depuis le ped source, remplace `dist/<name>*` seulement en cas de succès.
 
 ## Génération 3D : Tripo3D (cloud, défaut) ou local (futur poste GPU)
 
