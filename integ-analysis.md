@@ -1,8 +1,10 @@
 # Intégration en jeu d'un ped construit par le pipeline — analyse (2026-10-12)
 
 Statut (2026-10-13) : étapes 2 et 3 faites (export + assemblage, `scripts/ped_package.py`, voir
-`docs/architecture-decisions.md` point 38). Restent : variantes 001 à 005, `.oiv`, inscription
-et test en jeu. Deux choix restent à faire (voir la fin).
+`docs/architecture-decisions.md` point 38). Validé en jeu le 2026-10-13 par l'utilisateur :
+Alexandra (90C + fesses athletic, `ped_package.py`, installée à la main) fonctionne.
+Restent : variantes 001 à 005, `.oiv` et inscription automatisée. Deux choix restent à faire
+(voir la fin).
 
 Sources lues :
 - deux vrais paquets OIV : `Downloads/e41d11-Ped Selector/.../PedSelector.oiv` et
