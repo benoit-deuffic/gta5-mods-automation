@@ -832,8 +832,18 @@ GLUTE_SIDE_SECTOR = (20.0, 50.0)
 # Fade-in above the gluteal fold (13 cm below the apex on CatalinaNude).
 # 2 cm (the bust value) made an enlarged buttock overhang the thigh with a
 # sharp jagged crease at its lower outer edge; 6 cm still showed a defined
-# crease, 10 cm a soft natural fold -- and slim stayed clean at all three.
+# crease, 10 cm a soft natural fold.
 GLUTE_FOLD_FADE = 0.10
+# ... but only to ENLARGE. A reduction fades in BELOW the fold instead,
+# over GLUTE_REDUCE_FOLD_FADE, so the whole buttock above it is scaled
+# uniformly (the excess keeps its apex height). With the 10 cm fade above
+# the fold, the lower buttock kept most of its projection while the rest
+# was flattened and its leftover became the most prominent point: slim+low
+# read apex 0.82 with a sagging bump, slim+mid and athletic+low missed. A
+# 2 cm fade above the fold fitted too but left a lip on the thigh top (the
+# unscaled tissue just under the fold); 4 and 6 cm below: no lip, 6 the
+# smoothest, same numbers.
+GLUTE_REDUCE_FOLD_FADE = 0.06
 # The hips are widest at the gluteal fold level (trochanters, CatalinaNude
 # 40.3 cm) and there is no fold on the sides: the lateral lobes fade down
 # the outer thigh instead, over this distance.
@@ -864,6 +874,18 @@ def glute_shape_label(lateral_whr: float) -> str:
 def glute_height_label(apex_position: float) -> str:
     """Nearest GLUTE_HEIGHTS entry for a measured apex position."""
     return min(GLUTE_HEIGHTS, key=lambda h: abs(GLUTE_HEIGHTS[h] - apex_position))
+
+
+def glute_targets_reached(result, targets) -> bool:
+    """Whether a measured `result` (_measure_hips) is within tolerance of
+    every target (fit_glutes): judged on the FINAL measurement, not on the
+    fit loop's last bisection, which a later coordinate-descent step can
+    undo (the shape scales move the most prominent point)."""
+    if result is None:
+        return False
+    # + 1e-9: the measurements are rounded (3 / 2 decimals), 0.785 - 0.78 > 0.005 in floats
+    return all(abs(result[key] - target) <= (GLUTE_HEIGHT_TOLERANCE if key == "apex_position" else
+                                             GLUTE_FIT_TOLERANCE) + 1e-9 for key, target in targets.items())
 
 
 def cleft_top_height(points, edges, apex_z, top_z, center_x, back, lateral, step=0.005):
@@ -1391,11 +1413,13 @@ def measure_hips(armature) -> dict | None:
     return _public(m) if m else None
 
 
-def _glute_lobes(m, forward):
+def _glute_lobes(m, forward, projection=1.0):
     """(posterior, left, right) Lobes for measured heights `m`."""
     back_angle = math.atan2(-forward[1], -forward[0])
-    rear = Lobe(back_angle, GLUTE_SECTOR, m["fold_z"], min(m["fold_z"] + GLUTE_FOLD_FADE, m["apex_z"]),
-                m["apex_z"], m["waist_z"])
+    fold = m["fold_z"]
+    bottom, full = ((fold, min(fold + GLUTE_FOLD_FADE, m["apex_z"])) if projection >= 1
+                    else (fold - GLUTE_REDUCE_FOLD_FADE, fold))
+    rear = Lobe(back_angle, GLUTE_SECTOR, bottom, full, m["apex_z"], m["waist_z"])
     sides = [Lobe(back_angle + sign * math.pi / 2, GLUTE_SIDE_SECTOR, m["width_z"] - GLUTE_SIDE_THIGH_FADE,
                   m["width_z"], m["width_z"], m["waist_z"]) for sign in (1, -1)]
     return rear, sides
@@ -1415,7 +1439,8 @@ def fit_glutes(armature, shape: str | None = None, height: str | None = None) ->
        (GLUTE_FIT_ROUNDS) since the lobes overlap.
     The waist and everything below the lobes' fades don't move. Returns
     {"base", "targets", "scales", "shift_cm", "reached", "result"} or
-    {"error": ...}; reached=False = closest shape applied."""
+    {"error": ...}; reached (glute_targets_reached) is judged on the final
+    measurement; False = closest shape applied."""
     if shape is not None and shape not in GLUTE_SHAPES:
         raise ValueError(f"unknown glute shape {shape!r}, expected one of {list(GLUTE_SHAPES)}")
     if height is not None and height not in GLUTE_HEIGHTS:
@@ -1431,91 +1456,91 @@ def fit_glutes(armature, shape: str | None = None, height: str | None = None) ->
     if base is None:
         return {"error": "could not measure the hips (no glute apex, gluteal fold, waist or cleft found)"}
     center, wall = _wall(points, edges, base["waist_z"])
-    back = tuple(-c for c in forward)
     rear, _sides = _glute_lobes(base, forward)
-    reached, targets, delta = True, {}, 0.0
+    back = tuple(-c for c in forward)
+    targets, delta = {}, 0.0
 
     shift_bottom = base["fold_z"] - GLUTE_SHIFT_BELOW_FOLD
+    shifted_heights = {0.0: base}
 
-    def shifted(pts, w, d):
-        return vertical_shift(pts, w, center, rear, shift_bottom, base["waist_z"], d) if d else pts
-
-    def fold_after(d):
-        # the gluteal fold is on the posterior midline (full angular weight):
-        # its shifted height is exact, no need to re-detect it (see
-        # _measure_hips for why re-detection fails after a fit)
-        return {"fold_z": base["fold_z"] + d * shift_bump(base["fold_z"], shift_bottom, base["apex_z"],
-                                                          base["waist_z"])}
-
-    scales = {"projection": 1.0, "width": 1.0}
-    lobes_at = {"heights": base}
-
-    def lobes(sc):
-        rear_lobe, sides = _glute_lobes(lobes_at["heights"], forward)
-        return [(rear_lobe, sc["projection"])] + [(side, sc["width"]) for side in sides]
+    def landmarks(d):
+        # Heights of the shifted, not yet reshaped body (cached per shift):
+        # the shape lobes follow the moved bulge, and every measurement of
+        # a reshaped body takes its fold, waist and cleft top from here.
+        # The fold is on the posterior midline (full angular weight): its
+        # shifted height is exact, re-detection fails on a stretched
+        # surface (see _measure_hips). The waist is where every deformation
+        # fades to 0. The cleft top is skeletal (sacrum): re-detected after
+        # flattening the cheeks it moved (5 mm at slim scales) and vanished
+        # on a fully flattened buttock.
+        if d not in shifted_heights:
+            fold_z = base["fold_z"] + d * shift_bump(base["fold_z"], shift_bottom, base["apex_z"],
+                                                     base["waist_z"])
+            shifted = vertical_shift(points, weights, center, rear, shift_bottom, base["waist_z"], d)
+            shifted_heights[d] = _measure_hips(shifted, edges, pelvis_z, forward,
+                                               {"fold_z": fold_z, "waist_z": base["waist_z"]})
+        return shifted_heights[d]
 
     def deformation(d, sc):
-        return Deformation(GLUTE_BONE_PREFIXES, center, tuple(wall), tuple(lobes(sc)),
+        rear_lobe, sides = _glute_lobes(landmarks(d), forward, sc["projection"])
+        lobes = [(rear_lobe, sc["projection"])] + [(side, sc["width"]) for side in sides]
+        return Deformation(GLUTE_BONE_PREFIXES, center, tuple(wall), tuple(lobes),
                            (rear, shift_bottom, base["waist_z"], d) if d else None)
 
-    def transformed(d, sc):
-        return deformation(d, sc).apply(points, weights)
+    def measure(pts, d):
+        h = landmarks(d)
+        return _measure_hips(pts, edges, pelvis_z, forward, {k: h[k] for k in ("fold_z", "waist_z", "cleft_z")})
+
+    def measured(key, d, sc):
+        # A proportion as the final result reports it, negated: it falls as
+        # the shift / width scale grows. The width used to be bisected in a
+        # fold-to-cleft window frozen before the fit, which drifted from the
+        # final measurement (slim+mid: posterior 0.787 for 0.78).
+        m = measure(deformation(d, sc).apply(points, weights), d) if landmarks(d) else None
+        return -m[key] if m else 0.0
+
+    scales = {"projection": 1.0, "width": 1.0}
 
     def fit_height():
-        # Fully re-measured at each step: the shift also moves the cleft top
-        # (on the midline), and the shape lobes move the most prominent point
-        # a little, so the apex height alone isn't the proportion. Position
-        # decreases as the bulge rises: bisect on its negation.
-        def position(d):
-            m = _measure_hips(transformed(d, scales), edges, pelvis_z, forward, fold_after(d))
-            return -m["apex_position"] if m else 0.0
-        d, _p, ok = fit_monotonic(position, -GLUTE_HEIGHTS[height], *GLUTE_SHIFT_RANGE, GLUTE_HEIGHT_TOLERANCE)
+        d, _p, ok = fit_monotonic(lambda d: measured("apex_position", d, scales), -GLUTE_HEIGHTS[height],
+                                  *GLUTE_SHIFT_RANGE, GLUTE_HEIGHT_TOLERANCE)
         return d, ok
 
     if height is not None:
         targets["apex_position"] = GLUTE_HEIGHTS[height]
-        delta, ok_height = fit_height()
-    if delta:
-        # the shape lobes follow the moved bulge (fold fixed by construction)
-        lobes_at["heights"] = _measure_hips(shifted(points, weights, delta), edges, pelvis_z, forward,
-                                            fold_after(delta))
-        if lobes_at["heights"] is None:
-            return {"error": "could not measure the hips after the apex shift"}
-    current = lobes_at["heights"]
+        delta, _ok = fit_height()
+    if landmarks(delta) is None:
+        return {"error": "could not measure the hips after the apex shift"}
 
     if shape is not None:
         lateral_target, posterior_target = GLUTE_SHAPES[shape]
         targets.update(lateral_whr=lateral_target, posterior_whr=posterior_target)
-        lateral = (-forward[1], forward[0], 0.0)
-        waist_depth = slice_depth(points, edges, current["waist_z"], forward)
-        waist_width = _width(points, edges, current["waist_z"], lateral)
-        ok_depth = ok_width = True
+        waist_depth = slice_depth(points, edges, base["waist_z"], forward)
         # Coordinate descent: the posterior and lateral lobes overlap, and
         # both move the most prominent point, so the apex shift (if asked)
-        # and the scales are re-bisected in turn; the depth is always taken
-        # at the CURRENT most prominent point, the ratios last (they are the
-        # tighter targets).
+        # and the scales are re-bisected in turn, the ratios last (they are
+        # the tighter targets). The projection is bisected on the depth at
+        # the CURRENT apex height, not on the re-detected ratio: on a
+        # flattened buttock the most prominent point can jump (slim+high
+        # reached its lateral ratio at projection 0.375 with the apex at
+        # 0.21); the next round re-detects it.
         for _ in range(GLUTE_FIT_ROUNDS):
             if height is not None:
-                delta, ok_height = fit_height()
-            apex_z = _rear_apex(transformed(delta, scales), edges, pelvis_z, back)
-            scales["projection"], _v, ok_depth = fit_monotonic(
-                lambda s: slice_depth(transformed(delta, {**scales, "projection": s}), edges, apex_z, forward),
+                delta, _ok = fit_height()
+            apex_z = _rear_apex(deformation(delta, scales).apply(points, weights), edges, pelvis_z, back)
+            scales["projection"], _v, _ok = fit_monotonic(
+                lambda s: slice_depth(deformation(delta, {**scales, "projection": s}).apply(points, weights),
+                                      edges, apex_z, forward),
                 waist_depth / lateral_target, *GLUTE_FIT_RANGE,
                 GLUTE_FIT_TOLERANCE * waist_depth / lateral_target ** 2)
-            scales["width"], _v, ok_width = fit_monotonic(
-                lambda s: _widest(transformed(delta, {**scales, "width": s}),
-                                  edges, current["fold_z"], current["cleft_z"], lateral)[0],
-                waist_width / posterior_target, *GLUTE_FIT_RANGE,
-                GLUTE_FIT_TOLERANCE * waist_width / posterior_target ** 2)
-        reached &= ok_depth and ok_width
-    if height is not None:
-        reached &= ok_height
+            scales["width"], _v, _ok = fit_monotonic(
+                lambda s: measured("posterior_whr", delta, {**scales, "width": s}),
+                -posterior_target, *GLUTE_FIT_RANGE, GLUTE_FIT_TOLERANCE)
 
     applied = deformation(delta, scales)
     _write(armature, applied)
-    final = _samples(meshes, GLUTE_BONE_PREFIXES)[0]
-    result = _measure_hips(final, edges, pelvis_z, forward, fold_after(delta))
+    result = measure(_samples(meshes, GLUTE_BONE_PREFIXES)[0], delta)
     return {"base": _public(base), "targets": targets,
             "scales": {k: round(v, 3) for k, v in scales.items()}, "shift_cm": round(100 * delta, 1),
-            "reached": reached, "result": _public(result) if result else None, "deformation": applied}
+            "reached": glute_targets_reached(result, targets), "result": _public(result) if result else None,
+            "deformation": applied}

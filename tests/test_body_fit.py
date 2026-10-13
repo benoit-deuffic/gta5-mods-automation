@@ -12,7 +12,7 @@ from scripts.body_morphology import (
     GLUTE_HEIGHTS, GLUTE_SHAPES, Lobe, bra_band_mismatch, bra_size_label, bust_target_cm,
     cleft_top_height, excess_scale, fit_monotonic, follow_skin, mound_contract, widen_torso, fold_height, glute_height_label, glute_shape_label,
     hull_perimeter, parse_bra_size, section_xy, slice_circumference, slice_depth, slice_extent,
-    shift_bump, vertical_shift, wall_profile,
+    shift_bump, vertical_shift, wall_profile, glute_targets_reached, _glute_lobes,
 )
 
 
@@ -190,6 +190,57 @@ def test_cleft_top_is_where_the_midline_stops_lying_behind_the_cheeks():
             edges += [(base - len(ring) + i, base + i) for i in range(len(ring))]
     top = cleft_top_height(points, edges, 0.0, 0.08, 0.0, (0.0, 1.0, 0.0), (1.0, 0.0, 0.0), step=0.01)
     assert 0.03 <= top <= 0.05
+
+
+def _rear_apex_height(points, edges, heights):
+    return max(heights, key=lambda z: slice_extent(points, edges, z, (0.0, 1.0, 0.0)))
+
+
+@pytest.mark.parametrize("projection", [0.4, 0.6])
+def test_reducing_the_projection_keeps_the_most_prominent_point(projection):
+    # A buttock bulging behind a 12 cm wall: 6 cm excess at the apex (0.33),
+    # receding fast toward the waist, a broad, slowly receding lower half
+    # down to the fold (0.20) -- the CatalinaNude rear profile. Scaling
+    # the excess uniformly keeps its argmax; the long enlargement fold fade
+    # (GLUTE_FOLD_FADE) on a REDUCTION spared the lower half, whose remaining
+    # bulge became the new apex (CatalinaNude slim+low: apex at 0.82).
+    heights = [round(0.18 + 0.01 * k, 2) for k in range(38)]
+    def excess(z):
+        if z < 0.20:
+            return 0.0
+        if z < 0.25:  # tucks in toward the fold
+            return 0.01 + (0.0536 - 0.01) * (z - 0.20) / 0.05
+        return max(0.0, 0.06 - (1.0 if z <= 0.33 else 5.0) * (z - 0.33) ** 2)
+    points, edges = _tube(lambda z: 0.12 + excess(z), heights)
+    m = {"fold_z": 0.20, "apex_z": 0.33, "waist_z": 0.55, "width_z": 0.20}
+    forward = (0.0, -1.0, 0.0)
+    rear, _sides = _glute_lobes(m, forward, projection)
+    reduced = excess_scale(points, [1.0] * len(points), (0.0, 0.0), wall_profile(_ring_xy(0.12), (0.0, 0.0)),
+                           [(rear, projection)])
+    assert _rear_apex_height(points, edges, heights) == pytest.approx(0.33)
+    assert _rear_apex_height(reduced, edges, heights) == pytest.approx(0.33)
+    long_fade = Lobe(rear.axis_angle, rear.sector, 0.20, 0.30, 0.33, 0.55)
+    sagging = excess_scale(points, [1.0] * len(points), (0.0, 0.0), wall_profile(_ring_xy(0.12), (0.0, 0.0)),
+                           [(long_fade, projection)])
+    assert _rear_apex_height(sagging, edges, heights) < 0.30  # the defect this guards against
+
+
+def test_only_enlarging_fades_in_above_the_fold():
+    m = {"fold_z": 0.20, "apex_z": 0.33, "waist_z": 0.46, "width_z": 0.20}
+    grow, _ = _glute_lobes(m, (0.0, -1.0, 0.0), 1.4)
+    shrink, _ = _glute_lobes(m, (0.0, -1.0, 0.0), 0.6)
+    assert (grow.bottom_z, grow.full_z) == pytest.approx((0.20, 0.30))
+    assert shrink.bottom_z < 0.20 and shrink.full_z == pytest.approx(0.20)  # fades in under the fold
+
+
+def test_glute_targets_are_judged_on_the_final_measurement():
+    targets = {"apex_position": 0.6, "lateral_whr": 0.85, "posterior_whr": 0.78}
+    good = {"apex_position": 0.62, "lateral_whr": 0.846, "posterior_whr": 0.785}  # rounded, on the edges
+    assert glute_targets_reached(good, targets)
+    assert not glute_targets_reached({**good, "apex_position": 0.82}, targets)    # the slim+low defect
+    assert not glute_targets_reached({**good, "posterior_whr": 0.787}, targets)
+    assert not glute_targets_reached(None, targets)
+    assert glute_targets_reached({"apex_position": 0.45}, {})                     # nothing asked
 
 
 def test_zero_fold_fade_leaves_everything_below_the_fold_alone():
