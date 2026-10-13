@@ -336,8 +336,8 @@ def bust_target_cm(spec: str, underbust_cm: float) -> float:
     """Target bust circumference for EU size `spec` on a body whose MEASURED
     underbust is `underbust_cm`: underbust + middle of the cup's range. The
     measured underbust is used (not the nominal band) so the cup difference
-    is exact on this body; changing the band itself isn't supported (it is
-    a ribcage change, see bra_band_mismatch())."""
+    is exact on this body -- fit_bust() first brings the underbust to the
+    band when they differ (bra_band_mismatch)."""
     _band, cup = parse_bra_size(spec)
     low, high = EU_CUP_DIFF_CM[cup]
     return underbust_cm + (low + high) / 2
@@ -345,7 +345,7 @@ def bust_target_cm(spec: str, underbust_cm: float) -> float:
 
 def bra_band_mismatch(spec: str, underbust_cm: float) -> bool:
     """True if `spec` names a band more than half a band step (2.5 cm) away
-    from the measured underbust -- that part of the request can't be met."""
+    from the measured underbust -- the ribcage must be refitted to it."""
     band, _cup = parse_bra_size(spec)
     return band is not None and abs(band - underbust_cm) > 2.5
 
@@ -397,6 +397,7 @@ def fit_monotonic(f, target, lo, hi, tol, max_iter=20):
 # width) for the glutes. Each vertex is also weighted by its skin weight on
 # the region's bones (arms/hands: 0, so they never move).
 WALL_BINS = 72                  # 5 degree angle bins for the wall profile
+WALL_HARMONICS = 8              # Fourier terms kept (features down to ~22 degrees)
 # Bust: no fade-in above the fold. The excess over the sloped ribcage wall
 # (fit_bust) is already ~0 on the fold itself; a 2 cm fade weakened the
 # hanging underside of an 80G (z fold..+3 cm) and left a horizontal shelf
@@ -440,10 +441,14 @@ class Lobe:
         return height * _smooth_fade((off - full_deg) / (zero_deg - full_deg))
 
 
-def wall_profile(slice_xy, center, bins=WALL_BINS):
+def wall_profile(slice_xy, center, bins=WALL_BINS, harmonics=WALL_HARMONICS):
     """Pure logic (no bpy): outer radius per angle bin (around `center`) of a
-    horizontal section's (x, y) points. Empty bins are filled from the
-    nearest non-empty ones."""
+    horizontal section's (x, y) points, low-passed to its first `harmonics`
+    Fourier terms. Empty bins are filled from the nearest non-empty ones
+    first. Unfiltered, those fills made staircases (13.7 13.7 13.1 13.1 cm
+    at the underbust) that a strong reshape printed onto the skin:
+    new radius = wall + scaled excess carries the wall's own bumps
+    (crumpled breasts at 80A/75B, scale ~0.5)."""
     radii: list[float | None] = [None] * bins
     for p in slice_xy:
         theta, r = _polar(p, center)
@@ -457,7 +462,18 @@ def wall_profile(slice_xy, center, bins=WALL_BINS):
         if radii[i] is None:
             nearest = min(known, key=lambda k: min(abs(k - i), bins - abs(k - i)))
             radii[i] = radii[nearest]
-    return radii
+    return _low_pass(radii, harmonics)
+
+
+def _low_pass(values, harmonics):
+    """Periodic samples truncated to their first `harmonics` Fourier terms."""
+    n = len(values)
+    coefs = [(sum(v * math.cos(2 * math.pi * h * i / n) for i, v in enumerate(values)) * 2 / n,
+              sum(v * math.sin(2 * math.pi * h * i / n) for i, v in enumerate(values)) * 2 / n)
+             for h in range(harmonics + 1)]
+    mean = coefs[0][0] / 2
+    return [mean + sum(a * math.cos(2 * math.pi * h * i / n) + b * math.sin(2 * math.pi * h * i / n)
+                       for h, (a, b) in enumerate(coefs) if h) for i in range(n)]
 
 
 def _polar(p, center):
@@ -466,23 +482,27 @@ def _polar(p, center):
 
 
 def _wall_radius(wall, theta):
+    """Catmull-Rom between bin centers: a continuous slope, unlike linear
+    interpolation, so the wall leaves no creases on reshaped skin."""
     bins = len(wall)
     pos = (theta + math.pi) / (2 * math.pi) * bins - 0.5
     i = math.floor(pos)
-    frac = pos - i
-    return wall[i % bins] * (1 - frac) + wall[(i + 1) % bins] * frac
+    t = pos - i
+    p0, p1, p2, p3 = (wall[(i + k) % bins] for k in (-1, 0, 1, 2))
+    return 0.5 * (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t
+                  + (3 * p1 - p0 - 3 * p2 + p3) * t * t * t)
 
 
 def _wall_radius_at(wall, upper_wall, theta, z):
     """Wall radius at (theta, z): `wall` alone is a vertical cylinder;
-    `upper_wall` = (z0, z1, radii) slopes it linearly from `wall` at z0 to
-    `radii` at z1 (constant beyond both ends)."""
+    `upper_wall` = (z0, z1, radii) slopes it from `wall` at z0 to `radii` at
+    z1 (smoothstep: no slope break at either end; constant beyond)."""
     r = _wall_radius(wall, theta)
     if upper_wall is None:
         return r
     z0, z1, upper = upper_wall
     t = min(1.0, max(0.0, (z - z0) / (z1 - z0)))
-    return r + (_wall_radius(upper, theta) - r) * t if t else r
+    return r + (_wall_radius(upper, theta) - r) * t * t * (3 - 2 * t) if t else r
 
 
 def _smooth_fade(t):
@@ -542,24 +562,134 @@ def vertical_shift(points, weights, center, lobe, bottom_z, top_z, delta):
     return out
 
 
-def mound_contract(points, weights, center, wall, upper_wall, lobe, apex_z, apex_excess, scale):
-    """Pure logic (no bpy): scale the mound's HEIGHT on the chest around
-    `apex_z` along with its projection. Each point moves toward apex_z by
-    (1 - scale) * q, q = its excess over `wall` relative to the apex's
-    (`apex_excess`), capped at 1 -- times lobe and skin weights. The tip
-    (q ~ 1) shrinks like a scaled copy, the base (excess 0, on the ribcage)
-    stays put. Without it, excess_scale() alone kept an 80G's 12 cm tall
-    footprint at 80A: a vertical plateau (14.9 cm deep from z 0.30 to 0.38
-    on CatalinaNude), seen as a flattened pancake."""
+def mound_contract(points, weights, center, wall, upper_wall, lobe, apex_z, scale, apex_spread):
+    """Pure logic (no bpy): shrink (scale < 1) or grow each breast's
+    FOOTPRINT on the chest along with its projection. Each point slides on
+    the chest wall toward its apex (angle lobe axis +/- `apex_spread`,
+    height `apex_z`): in wall coordinates normalized by the apex-to-midline
+    angle and the apex-to-fold (below) / apex-to-lobe-top (above) heights,
+    offset -> offset * (1 - (1 - scale) * B(rho) * skin weight), with
+    B = (1 - rho^2)^2 (0 from rho = 1: midline, fold and upper chest stay
+    put). Its excess over the wall is kept (excess_scale then scales it).
+
+    Never folds: the radial derivative is 1 - c * (1 - rho^2)(1 - 5 rho^2)
+    >= 1 - c for c = 1 - scale in [0, 1] (>= 1 - 0.8|c| when growing).
+    The earlier per-point pull, proportional to each point's own excess,
+    varied fast near the breast base and inverted vertex order there --
+    crumpled outer breast and a step at nipple height on 80A/75B, hidden in
+    Blender previews by stale imported normals."""
+    c = 1 - scale
+    below, above = apex_z - lobe.bottom_z, lobe.top_z - apex_z
     out = []
     for p, w in zip(points, weights):
-        if w <= 0:
+        if w <= 0 or not c:
             out.append(tuple(p))
             continue
         theta, r = _polar(p, center)
-        q = min(1.0, max(0.0, (r - _wall_radius_at(wall, upper_wall, theta, p[2])) / apex_excess))
-        k = (1 - scale) * q * lobe.weight(p[2], theta) * min(w, 1.0)
-        out.append((p[0], p[1], p[2] + (apex_z - p[2]) * k) if k else tuple(p))
+        off = (theta - lobe.axis_angle + math.pi) % (2 * math.pi) - math.pi
+        apex_theta = lobe.axis_angle + math.copysign(apex_spread, off)
+        du = (theta - apex_theta + math.pi) % (2 * math.pi) - math.pi
+        dz = p[2] - apex_z
+        rho2 = (du / apex_spread) ** 2 + (dz / (below if dz < 0 else above)) ** 2
+        if rho2 >= 1:
+            out.append(tuple(p))
+            continue
+        k = c * (1 - rho2) ** 2 * min(w, 1.0)
+        new_theta, new_z = theta - du * k, p[2] - dz * k
+        excess = r - _wall_radius_at(wall, upper_wall, theta, p[2])
+        new_r = _wall_radius_at(wall, upper_wall, new_theta, new_z) + excess
+        out.append((center[0] + new_r * math.cos(new_theta), center[1] + new_r * math.sin(new_theta), new_z))
+    return out
+
+
+def widen_torso(points, weights, center, lobe, factor, seams=()):
+    """Pure logic (no bpy): scale the torso horizontally around `center` by
+    `factor` (> 1 wider), times the lobe's vertical profile and the skin
+    weight -- the ribcage change behind a different bra BAND. Arms (0 torso
+    weight) don't move; `seams` (Lobes on the flanks, see fit_bust) cancel
+    the scaling where the arm joins, by their weight."""
+    out = []
+    for p, w in zip(points, weights):
+        k = 0.0
+        if w > 0:
+            theta = _polar(p, center)[0]
+            seam = max((s.weight(p[2], theta) for s in seams), default=0.0)
+            k = (factor - 1) * lobe.weight(p[2], theta) * (1 - seam) * min(w, 1.0)
+        out.append((center[0] + (p[0] - center[0]) * (1 + k), center[1] + (p[1] - center[1]) * (1 + k), p[2])
+                   if k else tuple(p))
+    return out
+
+
+# Band (ribcage) fit: the underbust circumference is brought to the EU band
+# (band 90 = 90 cm, middle of its 88-92 range -- our convention): full
+# strength at the fold (where the band is measured), smooth fade-in over
+# BAND_FADE_BELOW m down toward the waist, ONE smooth fade-out from the
+# fold to ABOVE_APEX_FADE above the bust apex (the breasts ride on that
+# ribcage at 77-100% on CatalinaNude). A plateau up to the apex then a fade
+# left a curvature jump right at nipple height, rendered as a horizontal
+# light line across both breasts on a 75B. On the
+# FLANKS (BAND_SEAM_SECTOR around +/-90 deg) it fades out instead from the
+# fold to the ARMPIT -- the lowest skin vertex weighted to both an arm and
+# the torso (_armpit_z): arm vertices don't move, and at full strength there
+# the widening sheared that seam into a notch (CatalinaNude: mixed vertices
+# from z 0.35, apex 0.334). Fading to the armpit everywhere instead sheared
+# the breasts themselves (horizontal crease at nipple height on a 75B).
+BAND_FIT_RANGE = (0.8, 1.25)
+BAND_FIT_TOLERANCE_CM = 0.5
+BAND_FADE_BELOW = 0.12
+BAND_SEAM_SECTOR = (30.0, 60.0)  # degrees around each flank: full / no armpit fade
+ARM_BONE_PREFIXES = ("SKEL_L_UpperArm", "SKEL_R_UpperArm", "RB_L_ArmRoll", "RB_R_ArmRoll",
+                     "RB_L_UpperArm", "RB_R_UpperArm")
+
+
+# Meshes that carry the measured body surface (component codes): the fitted
+# Deformation is applied to them; every other mesh (jewellery, overlays,
+# clothing) follows the skin under it (follow_skin) instead of being
+# reshaped on its own excess -- a necklace lying on the upper chest was
+# scaled toward the wall like skin, closing its gap to the skin.
+SKIN_COMPONENTS = ("uppr", "lowr")
+FOLLOW_REACH = 0.03  # m: farther than that from any skin vertex, a point doesn't move
+
+
+def follow_skin(points, skin_from, skin_to, reach=FOLLOW_REACH):
+    """Pure logic (no bpy): move each point by the displacement of its
+    nearest skin vertex (`skin_from[i]` -> `skin_to[i]`), if one is within
+    `reach`. A translation per point: normals are left as they are."""
+    moved = [i for i, (a, b) in enumerate(zip(skin_from, skin_to)) if a != b]
+    if not moved:
+        return [tuple(p) for p in points]
+    lo = [min(skin_from[i][a] for i in moved) - 2 * reach for a in range(3)]
+    hi = [max(skin_from[i][a] for i in moved) + 2 * reach for a in range(3)]
+
+    def inside(p):
+        return all(lo[a] <= p[a] <= hi[a] for a in range(3))
+
+    def cell(p):
+        return tuple(int(math.floor(c / reach)) for c in p)
+
+    grid = {}
+    for i, p in enumerate(skin_from):
+        if inside(p):
+            grid.setdefault(cell(p), []).append(i)
+    out = []
+    for p in points:
+        if not inside(p):
+            out.append(tuple(p))
+            continue
+        cx, cy, cz = cell(p)
+        best, best_d = None, reach
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for i in grid.get((cx + dx, cy + dy, cz + dz), ()):
+                        d = math.dist(p, skin_from[i])
+                        if d <= best_d:
+                            best, best_d = i, d
+        if best is None or skin_from[best] == skin_to[best]:
+            out.append(tuple(p))
+        else:
+            a, b = skin_from[best], skin_to[best]
+            out.append(tuple(p[k] + b[k] - a[k] for k in range(3)))
     return out
 
 
@@ -570,9 +700,10 @@ class Deformation:
     rest-pose points weighted by their skin weight on `prefixes` bones
     (region_weight). The fits bake it into the Blender meshes; the exporter
     (ped_package.py) replays the same one on every LOD of the shipped .ydd
-    files, which Blender never imported. `shift` = (lobe, bottom_z, top_z,
-    delta), `contract` = (lobe, apex_z, apex_excess, scale), `upper_wall`
-    = (z0, z1, radii) (see _wall_radius_at), or None."""
+    files, which Blender never imported. `widen` = (center, lobe, factor,
+    seams) (widen_torso, applied first), `shift` = (lobe, bottom_z, top_z, delta),
+    `contract` = (lobe, apex_z, scale, apex_spread),
+    `upper_wall` = (z0, z1, radii) (see _wall_radius_at), or None."""
     prefixes: tuple[str, ...]
     center: tuple[float, float]
     wall: tuple[float, ...]
@@ -580,8 +711,11 @@ class Deformation:
     shift: tuple[Lobe, float, float, float] | None = None
     contract: tuple[Lobe, float, float, float] | None = None
     upper_wall: tuple[float, float, tuple[float, ...]] | None = None
+    widen: tuple[tuple[float, float], Lobe, float, tuple[Lobe, ...]] | None = None
 
     def apply(self, points, weights):
+        if self.widen is not None:
+            points = widen_torso(points, weights, *self.widen)
         if self.shift is not None:
             lobe, bottom_z, top_z, delta = self.shift
             points = vertical_shift(points, weights, self.center, lobe, bottom_z, top_z, delta)
@@ -596,12 +730,56 @@ class Deformation:
     def from_dict(cls, d: dict) -> "Deformation":
         def lobe(x):
             return Lobe(x["axis_angle"], tuple(x["sector"]), x["bottom_z"], x["full_z"], x["apex_z"], x["top_z"])
-        shift, contract, upper = d.get("shift"), d.get("contract"), d.get("upper_wall")
+        shift, contract, upper, widen = d.get("shift"), d.get("contract"), d.get("upper_wall"), d.get("widen")
         return cls(tuple(d["prefixes"]), tuple(d["center"]), tuple(d["wall"]),
                    tuple((lobe(lb), scale) for lb, scale in d["lobes"]),
                    (lobe(shift[0]), *shift[1:]) if shift else None,
                    (lobe(contract[0]), *contract[1:]) if contract else None,
-                   (upper[0], upper[1], tuple(upper[2])) if upper else None)
+                   (upper[0], upper[1], tuple(upper[2])) if upper else None,
+                   (tuple(widen[0]), lobe(widen[1]), widen[2], tuple(lobe(x) for x in widen[3]))
+                   if widen else None)
+
+
+FD_STEP = 1e-4  # m, finite-difference step of Deformation.jacobians
+
+
+def _deformation_jacobians(deformation, points, weights, moved, indices):
+    """{i: 3x3 row-major d moved / d point} for `indices` (forward
+    differences, skin weights held fixed)."""
+    probes = [deformation.apply([tuple(c + (FD_STEP if a == axis else 0.0) for a, c in enumerate(points[i]))
+                                 for i in indices], [weights[i] for i in indices]) for axis in range(3)]
+    return {i: tuple(tuple((probes[axis][n][r] - moved[i][r]) / FD_STEP for axis in range(3)) for r in range(3))
+            for n, i in enumerate(indices)}
+
+
+def carry_normal(jac, normal):
+    """Pure logic: a normal through a deformation with Jacobian `jac` --
+    the adjugate-transpose (det * J^-T), renormalized."""
+    (a, b, c), (d, e, f), (g, h, i) = jac
+    adj = ((e * i - f * h, f * g - d * i, d * h - e * g),
+           (c * h - b * i, a * i - c * g, b * g - a * h),
+           (b * f - c * e, c * d - a * f, a * e - b * d))
+    return _unit(tuple(sum(adj[r][k] * normal[k] for k in range(3)) for r in range(3)))
+
+
+def carry_tangent(jac, tangent):
+    """Pure logic: a tangent direction through Jacobian `jac`, renormalized."""
+    return _unit(tuple(sum(jac[r][k] * tangent[k] for k in range(3)) for r in range(3)))
+
+
+def _unit(v):
+    n = math.sqrt(sum(c * c for c in v))
+    return tuple(c / n for c in v) if n > 0 else tuple(v)
+
+
+def deform_with_jacobians(deformation, points, weights):
+    """(moved points, {index: Jacobian} for the vertices that moved) -- what
+    both the Blender bake and the .ydd export need to carry normals and
+    tangents along (a deformed surface keeping its old normals renders
+    stale shading: a horizontal light band across a 75B)."""
+    moved = deformation.apply(points, weights)
+    changed = [i for i, (a, b) in enumerate(zip(points, moved)) if a != b]
+    return moved, (_deformation_jacobians(deformation, points, weights, moved, changed) if changed else {})
 
 
 def region_weight(influences, prefixes) -> float:
@@ -894,19 +1072,47 @@ def _samples(meshes, prefixes):
     return points, weights, edges
 
 
-def _write(meshes, deformation: Deformation):
-    """bpy: bake `deformation` into every mesh's rest-pose vertices."""
+def _write(armature, deformation: Deformation):
+    """bpy: bake `deformation` into the skin meshes' rest-pose vertices
+    (_body_meshes) -- their custom (imported) normals carried through its
+    Jacobian, as ped_package.py does -- then move every other mesh with the
+    skin under it (follow_skin, a translation: normals unchanged)."""
     import mathutils
-    for obj in meshes:
+
+    def store(obj, world, moved, jacobians=None):
+        mesh = obj.data
+        if jacobians and mesh.has_custom_normals:
+            # world == object space for ped components (identity matrices,
+            # checked vertex for vertex against the CodeWalker XML)
+            loops = [tuple(n.vector) for n in mesh.corner_normals]
+            for loop in mesh.loops:
+                jac = jacobians.get(loop.vertex_index)
+                if jac is not None:
+                    loops[loop.index] = carry_normal(jac, loops[loop.index])
+        else:
+            loops = None
+        to_local = obj.matrix_world.inverted()
+        for v, old, new in zip(mesh.vertices, world, moved):
+            if new != old:
+                v.co = to_local @ mathutils.Vector(new)
+        mesh.update()
+        if loops is not None:
+            mesh.normals_split_custom_set(loops)
+
+    skin = _body_meshes(armature)
+    skin_from, skin_to = [], []
+    for obj in skin:
         names = {g.index: g.name for g in obj.vertex_groups}
         world = [tuple(obj.matrix_world @ v.co) for v in obj.data.vertices]
         weights = [_region_weight(v, names, deformation.prefixes) for v in obj.data.vertices]
-        moved = deformation.apply(world, weights)
-        to_local = obj.matrix_world.inverted()
-        for v, old, new in zip(obj.data.vertices, world, moved):
-            if new != old:
-                v.co = to_local @ mathutils.Vector(new)
-        obj.data.update()
+        moved, jacobians = deform_with_jacobians(deformation, world, weights)
+        store(obj, world, moved, jacobians)
+        skin_from += world
+        skin_to += moved
+    for obj in _meshes(armature):
+        if obj not in skin:
+            world = [tuple(obj.matrix_world @ v.co) for v in obj.data.vertices]
+            store(obj, world, follow_skin(world, skin_from, skin_to))
 
 
 def _wall(points, edges, wall_z):
@@ -941,12 +1147,25 @@ def measure_chest(armature) -> dict | None:
     """bpy: tape-like underbust/bust circumferences of the ped's body mesh
     in rest pose, e.g. {"underbust_cm": 80.4, "bust_cm": 105.7, "size":
     "80G", ...}. None if no breast region or no inframammary fold is found."""
-    meshes = _meshes(armature)
-    body, regions = _breast_regions(armature, meshes)
+    body, regions = _breast_regions(armature, _body_meshes(armature))
     if not regions:
         return None
     torso, _weights, edges = _samples([body], TORSO_BONE_PREFIXES)
     return _measure_bust(torso, edges, regions)
+
+
+def _armpit_z(meshes):
+    """bpy: height of the lowest skin vertex weighted to both an arm bone
+    and the torso (> 5% each) -- where the arm/torso seam starts. None if
+    there is none."""
+    zs = []
+    for obj in meshes:
+        names = {g.index: g.name for g in obj.vertex_groups}
+        for v in obj.data.vertices:
+            arm = sum(g.weight for g in v.groups if names[g.group].startswith(ARM_BONE_PREFIXES))
+            if arm > 0.05 and _region_weight(v, names, TORSO_BONE_PREFIXES) > 0.05:
+                zs.append((obj.matrix_world @ v.co).z)
+    return min(zs) if zs else None
 
 
 def fit_bust(armature, bra_size: str) -> dict:
@@ -958,18 +1177,51 @@ def fit_bust(armature, bra_size: str) -> dict:
     section), evaluated on in-memory torso points -- the meshes are written
     once, with the final scale, then re-measured.
 
-    Returns {"base", "target_bust_cm", "scale", "reached", "result",
-    "band_mismatch"} or {"error": ...}. reached=False means the target is
-    outside BUST_FIT_RANGE: the closest achievable shape is applied and
-    reported, never silently passed off as the requested size."""
-    meshes = _meshes(armature)
-    body, regions = _breast_regions(armature, meshes)
+    A band more than 2.5 cm off the measured underbust (bra_band_mismatch)
+    is fitted first, the same way: widen_torso() factor bisected on the
+    underbust circumference, then the cup is fitted on the widened body.
+
+    Returns {"base", "band", "target_bust_cm", "scale", "reached",
+    "result", "band_mismatch"} or {"error": ...}; "band" = {"target_cm",
+    "factor", "reached"} or None if the body's band was kept. reached=False
+    means a target is outside BAND_FIT_RANGE/BUST_FIT_RANGE: the closest
+    achievable shape is applied and reported, never silently passed off as
+    the requested size."""
+    body, regions = _breast_regions(armature, _body_meshes(armature))
     if not regions:
-        return {"error": "no breast region found on the body mesh"}
+        return {"error": "no breast region found on an uppr/lowr skin mesh"}
     torso, weights, edges = _samples([body], TORSO_BONE_PREFIXES)
-    base = _measure_bust(torso, edges, regions)
+    original_torso = torso
+    base = original = _measure_bust(torso, edges, regions)
     if base is None:
         return {"error": f"could not measure the chest of {body.name} (no apex/fold found)"}
+
+    widen, band = None, None
+    if bra_band_mismatch(bra_size, base["underbust_cm"]):
+        band_cm = parse_bra_size(bra_size)[0]
+        band_center, _radii = _wall(torso, edges, base["fold_z"])
+        armpit_z = _armpit_z(_body_meshes(armature))
+        if armpit_z is None or armpit_z <= base["fold_z"]:
+            return {"error": f"no armpit found above the underbust of {body.name}: can't bound the band fit"}
+        band_lobe = Lobe(0.0, (180.0, 181.0), base["fold_z"] - BAND_FADE_BELOW, base["fold_z"],
+                         base["fold_z"], base["apex_z"] + ABOVE_APEX_FADE)
+        # seam weight: 0 at the fold, 1 from the armpit up (top far above)
+        forward_angle = math.atan2(regions[0]["forward"][1], regions[0]["forward"][0])
+        seams = tuple(Lobe(forward_angle + sign * math.pi / 2, BAND_SEAM_SECTOR, base["fold_z"], armpit_z,
+                           armpit_z + 10.0, armpit_z + 11.0) for sign in (1, -1))
+
+        def widened(f):
+            return widen_torso(torso, weights, band_center, band_lobe, f, seams)
+
+        factor, _v, band_reached = fit_monotonic(
+            lambda f: 100 * slice_circumference(widened(f), edges, base["fold_z"]),
+            band_cm, *BAND_FIT_RANGE, BAND_FIT_TOLERANCE_CM)
+        widen = (band_center, band_lobe, factor, seams)
+        band = {"target_cm": band_cm, "factor": round(factor, 3), "reached": band_reached}
+        torso = widened(factor)  # the cup is fitted on the new ribcage
+        base = _measure_bust(torso, edges, regions)
+        if base is None:
+            return {"error": f"could not measure the chest of {body.name} after the band fit"}
     target = bust_target_cm(bra_size, base["underbust_cm"])
     center, wall = _wall(torso, edges, base["fold_z"])
     forward = regions[0]["forward"]
@@ -984,17 +1236,18 @@ def fit_bust(armature, bra_size: str) -> dict:
     # the lobe stops (untouched upper chest).
     upper_z = lobe.top_z
     upper_wall = (base["fold_z"], upper_z, tuple(wall_profile(section_xy(torso, edges, upper_z), center)))
-    # the apex's excess over the wall (both breasts' mean): mound_contract's
-    # reference, so the tip shrinks in height as much as in projection
+    # angle from the body's forward axis to each apex (both breasts' mean):
+    # mound_contract's half-width, so the midline never moves
     apexes = [a for a in (bust_apex(torso, r["head"], r["forward"]) for r in regions) if a is not None]
-    apex_excess = sum(_polar(a, center)[1] - _wall_radius_at(wall, upper_wall, _polar(a, center)[0], a[2])
-                      for a in apexes) / len(apexes)
-    if apex_excess <= 0:
-        return {"error": f"the bust apex of {body.name} doesn't stand out of its ribcage wall"}
+    apex_spread = sum(abs((_polar(a, center)[0] - lobe.axis_angle + math.pi) % (2 * math.pi) - math.pi)
+                      for a in apexes) / len(apexes) if apexes else 0.0
+    if apex_spread <= 0:
+        return {"error": f"no bust apexes found on both sides of {body.name}'s midline"}
 
     def deformation(s):
         return Deformation(TORSO_BONE_PREFIXES, center, tuple(wall), ((lobe, s),),
-                           contract=(lobe, base["apex_z"], apex_excess, s), upper_wall=upper_wall)
+                           contract=(lobe, base["apex_z"], s, apex_spread), upper_wall=upper_wall,
+                           widen=widen)
 
     # Measured at the BASE apex/fold heights throughout (a tape kept at the
     # original nipple height): the most-forward point drops as the breast
@@ -1002,18 +1255,19 @@ def fit_bust(armature, bra_size: str) -> dict:
     # apex height non-monotonic in the scale and broke the bisection.
 
     scale, _predicted, reached = fit_monotonic(
-        lambda s: 100 * slice_circumference(deformation(s).apply(torso, weights), edges, base["apex_z"]),
+        lambda s: 100 * slice_circumference(deformation(s).apply(original_torso, weights), edges, base["apex_z"]),
         target, *BUST_FIT_RANGE, BUST_FIT_TOLERANCE_CM)
-    _write(meshes, deformation(scale))
+    _write(armature, deformation(scale))
 
     final = _samples([body], TORSO_BONE_PREFIXES)[0]  # re-read from the written mesh
     underbust = 100 * slice_circumference(final, edges, base["fold_z"])
     bust = 100 * slice_circumference(final, edges, base["apex_z"])
     result = {"underbust_cm": round(underbust, 1), "bust_cm": round(bust, 1),
               "size": bra_size_label(underbust, bust)}
-    return {"base": {k: base[k] for k in ("underbust_cm", "bust_cm", "size")},
-            "target_bust_cm": round(target, 1), "scale": round(scale, 3), "reached": reached,
-            "result": result, "band_mismatch": bra_band_mismatch(bra_size, base["underbust_cm"]),
+    return {"base": {k: original[k] for k in ("underbust_cm", "bust_cm", "size")}, "band": band,
+            "target_bust_cm": round(target, 1), "scale": round(scale, 3),
+            "reached": reached and (band is None or band["reached"]),
+            "result": result, "band_mismatch": bra_band_mismatch(bra_size, underbust),
             "deformation": deformation(scale)}
 
 
@@ -1024,7 +1278,7 @@ def _body_meshes(armature):
     components, recognized by their <comp>_diff_ material."""
     import blender_rig_export as bre
     return [o for o in _meshes(armature)
-            if (bre.classify_body_component(o) or ("",))[0] in ("uppr", "lowr")]
+            if (bre.classify_body_component(o) or ("",))[0] in SKIN_COMPONENTS]
 
 
 def _forward(armature):
@@ -1259,7 +1513,7 @@ def fit_glutes(armature, shape: str | None = None, height: str | None = None) ->
         reached &= ok_height
 
     applied = deformation(delta, scales)
-    _write(_meshes(armature), applied)
+    _write(armature, applied)
     final = _samples(meshes, GLUTE_BONE_PREFIXES)[0]
     result = _measure_hips(final, edges, pelvis_z, forward, fold_after(delta))
     return {"base": _public(base), "targets": targets,

@@ -1319,6 +1319,61 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
         profil et de trois-quarts ;
       - fesses inchangées.
     - L'export rejoue la nouvelle déformation telle quelle (`Deformation.contract`, `upper_wall`).
-    - Le collier (`accs_000`) bouge maintenant un peu avec le haut de poitrine : il est devant la
-      paroi inclinée. L'écart avec la peau est réduit, sans pénétration visible.
-    - Reste : l'emprise LATÉRALE du sein n'est pas réduite, un 80A garde une base assez large.
+    - Les deux limites restantes (largeur, collier) sont traitées au point 40.
+
+40. **Largeur du sein + objets qui suivent la peau (2026-10-13)** : suite du point 39.
+    - **Largeur** : `mound_contract` contracte aussi l'angle horizontal vers l'apex de chaque sein
+      (axe ± `apex_spread`), avec le même facteur k que la hauteur. Le profil d'attraction est un
+      TRIANGLE : 0 sur la ligne médiane, 1 à l'apex, 0 un écart plus loin. Il valait 1 jusqu'au
+      flanc dans un premier essai, qui arrachait la peau de l'aisselle : elle était tirée vers
+      l'avant alors que le bras voisin, de poids torse nul, restait en place. Le décalage maximal est
+      k·spread/4 et la transformation reste monotone. Sur CatalinaNude en 80A : spread 27,6°,
+      décalage maximal 3,45°, soit ≈ 0,9 cm de chaque côté de chaque sein. Le rétrécissement est
+      donc modeste mais sans artefact (rendus de face, de trois-quarts et de profil).
+    - **Objets portés** : la déformation analytique ne s'applique plus qu'à la peau
+      (`SKIN_COMPONENTS` = uppr, lowr). Tous les autres meshes (collier, task/pubis, vêtements)
+      suivent le déplacement du sommet de peau le plus proche (`follow_skin`, portée 3 cm).
+      Avant, le collier était déformé selon sa propre saillie au-dessus de la paroi, et l'écart avec
+      la peau se refermait. Le mesh de poitrine est aussi choisi parmi la peau seulement (avant :
+      le mesh le plus proche de l'os, qui pouvait être le collier).
+    - L'export (`ped_package.reshape_ped_xml`) fait exactement la même chose, étape par étape :
+      peau analytique sur tous les LOD, puis suiveurs sur le déplacement du LOD High de la peau
+      (le seul importé dans Blender). Les normales des suiveurs ne changent pas (translation).
+    - Vérifié : LOD High livré = Blender à 0,0001 mm pour uppr, lowr ET le collier (806 sommets
+      déplacés d'au plus 2 mm). Le 80A est atteint (94,5 cm). Les fesses ne changent pas.
+
+41. **Tour de dos (bande) ajusté + poitrine sans pliure (2026-10-13)** : « 90C » donnait un 80C.
+    - **Bande** : si la taille demandée s'écarte de plus de 2,5 cm de la sous-poitrine mesurée,
+      `fit_bust` élargit ou rétrécit d'abord la cage thoracique (`widen_torso` : échelle
+      horizontale autour du centre de la section sous-poitrine). Le facteur est trouvé par
+      bissection sur le tour sous-poitrine (cible = la bande, ex. 90 cm : milieu de la plage
+      88-92, notre convention). Ensuite seulement, le bonnet est ajusté sur le corps élargi. Tout
+      reste dans une seule `Deformation` (`widen`), donc l'export la rejoue à l'identique.
+      - Profil vertical : pleine force au pli, fondu de 12 cm vers la taille, un seul fondu vers le
+        haut jusqu'à 13 cm au-dessus de l'apex. Un plateau jusqu'à l'apex suivi d'un fondu laissait
+        une rupture de courbure à la hauteur du mamelon.
+      - Flancs (±30-60° autour de ±90°) : l'effet s'annule progressivement du pli à l'aisselle
+        (`_armpit_z` = plus bas sommet de peau pondéré à la fois bras et torse). Les sommets du bras
+        ne bougent pas, et à pleine force la jonction bras/torse faisait une encoche.
+    - **Pliures (80A, 75B)** : trois causes, toutes corrigées.
+      1. `mound_contract` tirait chaque point vers l'apex selon SA saillie, qui varie vite à la base
+         du sein : l'ordre des sommets s'inversait (sein froissé). Remplacé par une contraction
+         lisse sur la paroi, k = c·(1-ρ²)², nulle à la ligne médiane, au pli et en haut de poitrine.
+         Elle ne replie jamais (dérivée ≥ 1-c), ce qui est testé.
+      2. La paroi (`wall_profile`) faisait des marches : les cases vides étaient remplies par la plus
+         proche (13,7 13,7 13,1 13,1 cm), et la réduction les recopiait sur la peau. Corrigé par un
+         filtre passe-bas de Fourier (8 harmoniques), une interpolation Catmull-Rom et un raccord
+         smoothstep vers la paroi haute.
+      3. Le `.blend` gardait les normales importées : dans Blender, l'ombrage était faux sur la
+         peau déformée (bande claire horizontale), sans rapport avec la géométrie. `_write` les
+         recalcule avec la même jacobienne que l'export (`deform_with_jacobians`, partagé).
+    - Vérifié sur CatalinaNude :
+      - 90C → sous-poitrine 90,4 cm, poitrine 107,0 cm (~90C), facteur de cage 1,109 ;
+      - 75B → 74,9 / 89,7 cm ;
+      - 80A → 94,4 cm ; 80E → 102,7 cm ;
+      - rendus de face, de trois-quarts et de profil sans pliure, encoche ni marche ;
+      - fesses athletic / large propres et dans les cibles.
+    - Export Alexandra (90C + athletic) : positions = Blender à 0,0001 mm près, normales à 0,02° près
+      (99e centile).
+    - Limite connue, déjà présente au commit e4cc6be : slim + low n'atteint pas l'apex visé (0,81
+      au lieu de 0,60, avec avertissement) et laisse un renflement tombant.

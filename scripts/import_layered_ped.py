@@ -92,9 +92,10 @@ def parse_args():
                               f"for valid names (values clamped to "
                               f"[{body_morphology.SLIDER_MIN}, {body_morphology.SLIDER_MAX}])")
     parser.add_argument("--bust-size", default=None,
-                         help="Optional EU bra size to fit the bust to, e.g. '80A' or just 'B' (keeps the "
-                              "body's own band): measured on the mesh and reshaped until the bust "
-                              "circumference matches (body_morphology.fit_bust)")
+                         help="Optional EU bra size to fit the bust to, e.g. '90C' or just 'B' (keeps the "
+                              "body's own band): measured on the mesh; a different band widens or "
+                              "narrows the ribcage until the underbust matches, then the bust is "
+                              "reshaped until its circumference matches (body_morphology.fit_bust)")
     parser.add_argument("--glutes", default=None, choices=sorted(body_morphology.GLUTE_SHAPES),
                          help="Optional buttock shape: measured on the mesh and reshaped until the "
                               "lateral (projection) and posterior (hip width) waist-to-hip ratios "
@@ -508,6 +509,12 @@ def main():
         deformations.append(fit["deformation"])
         base, result = fit["base"], fit["result"]
         print(f"[BUST] base: underbust {base['underbust_cm']} cm, bust {base['bust_cm']} cm (~{base['size']})")
+        if fit["band"]:
+            band = fit["band"]
+            print(f"[BUST] band {band['target_cm']}: ribcage widened x{band['factor']}")
+            if not band["reached"]:
+                print(f"[WARN] band {band['target_cm']} cm not reachable within ribcage factor "
+                      f"{body_morphology.BAND_FIT_RANGE}: closest ribcage applied")
         print(f"[BUST] requested {args.bust_size}: target bust {fit['target_bust_cm']} cm, region scale "
               f"{fit['scale']} -> underbust {result['underbust_cm']} cm, bust {result['bust_cm']} cm "
               f"(~{result['size']})")
@@ -515,8 +522,8 @@ def main():
             print(f"[WARN] bust target {fit['target_bust_cm']} cm not reachable within region scale "
                   f"{body_morphology.BUST_FIT_RANGE}: closest shape applied")
         if fit["band_mismatch"]:
-            print(f"[WARN] requested band of {args.bust_size} differs from the measured underbust "
-                  f"{base['underbust_cm']} cm: band changes are not supported, only the cup was fitted")
+            print(f"[WARN] resulting underbust {result['underbust_cm']} cm is still off the band of "
+                  f"{args.bust_size}")
     else:
         chest = body_morphology.measure_chest(armature)
         if chest:

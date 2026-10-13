@@ -16,7 +16,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from body_morphology import Deformation, Lobe, excess_scale, region_weight  # noqa: E402
-from ped_package import PackageError, deform_drawable_dictionary, package_ped  # noqa: E402
+from ped_package import PackageError, package_ped, reshape_ped_xml  # noqa: E402
+
+
+def deform_drawable_dictionary(root, deformations, skeleton, component="uppr"):
+    return reshape_ped_xml({component: root}, deformations, skeleton)[component]
 
 # Full effect at every angle and every z in [-1, 1]: excess over a 0.1 m
 # wall is doubled.
@@ -74,7 +78,7 @@ def _vertices(root):
 def test_deformation_round_trips_through_json_and_matches_excess_scale():
     shifted = Deformation(("SPR_",), (0.0, 0.0), (0.1,) * 8, ((_EVERYWHERE, 2.0),), (_EVERYWHERE, -1.0, 2.0, 0.01))
     contracted = Deformation(("SPR_",), (0.0, 0.0), (0.1,) * 8, ((_EVERYWHERE, 0.5),),
-                             contract=(_EVERYWHERE, 0.33, 0.05, 0.5), upper_wall=(0.26, 0.46, (0.08,) * 8))
+                             contract=(_EVERYWHERE, 0.33, 0.5, 0.4), upper_wall=(0.26, 0.46, (0.08,) * 8))
     for d in (_DOUBLE, shifted, contracted):
         assert Deformation.from_dict(json.loads(json.dumps(d.to_dict()))) == d
     pts = [(0.2, 0.0, 0.0), (0.05, 0.0, 0.0)]
@@ -193,3 +197,19 @@ def test_package_copies_originals_renamed_when_nothing_is_reshaped(tmp_path):
     assert (tmp_path / "out" / "New.ymt").read_bytes() == b"ymt"
     assert (tmp_path / "out" / "New" / "head_000_r.ydd").read_bytes() == b"head"
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["New", "New.yft", "New.ymt"]
+
+
+def test_non_skin_components_follow_the_skin_instead_of_being_reshaped():
+    skin = _ydd()
+    # a "necklace" 1 cm in front of the moving breast vertex, itself skinned
+    # to the breast bone: reshaped on its own it would move 2 cm (its excess
+    # 0.11 doubled); following the skin it moves like the skin vertex (+0.1)
+    necklace = ET.fromstring(_YDD.format(declared=4, bone_ids="0, 1, 2, 3", breast=2, hand=2)
+                             .replace("0.2 0 0   255", "0.21 0 0   255", 1)
+                             .replace("-0.2 0 0   255", "-0.5 0 0   255", 1))
+    moved = reshape_ped_xml({"uppr": skin, "accs": necklace}, [_DOUBLE], _SKELETON)
+    assert moved == {"uppr": 1, "accs": 1}
+    near, far = _vertices(necklace)
+    assert [float(c) for c in near[:3]] == pytest.approx([0.31, 0.0, 0.0])
+    assert near[11:14] == ["1", "0", "0"]  # translated: normal untouched
+    assert far[:3] == ["-0.5", "0", "0"]   # no skin vertex within reach

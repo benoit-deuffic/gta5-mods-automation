@@ -10,7 +10,7 @@ import pytest
 
 from scripts.body_morphology import (
     GLUTE_HEIGHTS, GLUTE_SHAPES, Lobe, bra_band_mismatch, bra_size_label, bust_target_cm,
-    cleft_top_height, excess_scale, fit_monotonic, mound_contract, fold_height, glute_height_label, glute_shape_label,
+    cleft_top_height, excess_scale, fit_monotonic, follow_skin, mound_contract, widen_torso, fold_height, glute_height_label, glute_shape_label,
     hull_perimeter, parse_bra_size, section_xy, slice_circumference, slice_depth, slice_extent,
     shift_bump, vertical_shift, wall_profile,
 )
@@ -211,17 +211,89 @@ def test_sloped_wall_counts_only_what_stands_out_of_a_receding_chest():
     vertical = excess_scale(point, [1.0], lobes=lobes, **kwargs)[0]
     sloped = excess_scale(point, [1.0], lobes=lobes, upper_wall=sloped_to(0.20), **kwargs)[0]
     assert vertical[1] == pytest.approx(-0.15)  # 6 cm of excess halved
-    assert sloped[1] == pytest.approx(-0.18 + 0.5 * (0.18 - 0.148))  # wall 14.8 cm there
+    st = 0.35 ** 2 * (3 - 2 * 0.35)  # smoothstep slope: 0.3175 of the way
+    assert sloped[1] == pytest.approx(-0.18 + 0.5 * (0.18 - (0.12 + 0.08 * st)))
     # a wall reaching 18 cm at that height: nothing stands out, nothing moves
-    on_wall = excess_scale(point, [1.0], lobes=lobes, upper_wall=sloped_to(0.12 + 0.06 / 0.35), **kwargs)[0]
+    on_wall = excess_scale(point, [1.0], lobes=lobes, upper_wall=sloped_to(0.12 + 0.06 / st), **kwargs)[0]
     assert on_wall == pytest.approx(point[0])
 
 
-def test_mound_contract_shrinks_the_tip_toward_the_apex_and_keeps_the_base():
+def _contract(points, scale=0.5, spread=math.radians(30)):
     kwargs = _wall_kwargs()
-    tip_below = (0.0, -0.18, 0.30)    # full apex excess (6 cm), 3 cm under the apex
-    base_below = (0.0, -0.12, 0.30)   # on the wall: no excess
-    out = mound_contract([tip_below, base_below], [1.0, 1.0], kwargs["center"], kwargs["wall"], None,
-                         _lobe(0.0), 0.33, 0.06, 0.5)
-    assert out[0][2] == pytest.approx(0.315)  # half-way to the apex
-    assert out[1] == base_below
+    # lobe: fold 0.26 (0.07 below the apex), top 0.46 (0.13 above)
+    return mound_contract(points, [1.0] * len(points), kwargs["center"], kwargs["wall"], None,
+                          _lobe(0.0), 0.33, scale, spread)
+
+
+def _at(deg, z=0.33, r=0.18):
+    a = FRONT + math.radians(deg)
+    return (r * math.cos(a), r * math.sin(a), z)
+
+
+def _angle(p):
+    return math.degrees(math.atan2(p[1], p[0]) - FRONT)
+
+
+def test_mound_contract_shrinks_the_footprint_toward_each_apex():
+    apex, below, outer = _at(30), _at(30, z=0.33 - 0.035), _at(45)
+    out = _contract([apex, below, outer])
+    assert out[0] == pytest.approx(apex)                     # the apex itself stays
+    assert out[1][2] == pytest.approx(0.33 - 0.035 * (1 - 0.5 * 0.75 ** 2))  # rho 0.5: B = 0.5625
+    assert 30 < _angle(out[2]) < 45                          # pulled toward its apex
+    assert math.hypot(*out[1][:2]) == pytest.approx(0.18)    # excess over the 12 cm wall kept
+
+
+def test_mound_contract_leaves_midline_fold_and_upper_chest_alone():
+    still = [_at(0), _at(-0.5), _at(30, z=0.26), _at(30, z=0.46), _at(70)]
+    for before, after in zip(still, _contract(still)):
+        assert after == pytest.approx(before, abs=1e-4)
+
+
+@pytest.mark.parametrize("scale", [0.0, 0.5, 1.5])
+def test_mound_contract_never_folds(scale):
+    # vertex order along any line through the footprint is kept
+    zs = [0.26 + 0.002 * k for k in range(101)]
+    column = [_at(35, z=z) for z in zs]
+    moved_z = [p[2] for p in _contract(column, scale)]
+    assert all(b > a for a, b in zip(moved_z, moved_z[1:]))
+    row = [_at(d) for d in [0.5 * k for k in range(1, 121)]]
+    moved = [_angle(p) for p in _contract(row, scale)]
+    assert all(b > a for a, b in zip(moved, moved[1:]))
+
+
+def test_follow_skin_translates_with_the_nearest_skin_vertex_within_reach():
+    skin_from = [(0.0, 0.0, 0.0), (0.1, 0.0, 0.0)]
+    skin_to = [(0.0, -0.02, 0.0), (0.1, 0.0, 0.0)]
+    out = follow_skin([(0.005, 0.0, 0.0), (0.095, 0.0, 0.0), (0.0, 0.0, 0.5)], skin_from, skin_to)
+    assert out[0] == pytest.approx((0.005, -0.02, 0.0))  # nearest moved
+    assert out[1] == (0.095, 0.0, 0.0)                    # nearest didn't
+    assert out[2] == (0.0, 0.0, 0.5)                      # nothing within reach
+
+
+def test_wall_profile_is_smooth_even_with_empty_bins():
+    # a sparse ring (one point per 15 degrees, 5-degree bins: 2 of 3 empty)
+    # used to give a staircase; now a smooth circle
+    center = (0.0, 0.0)
+    ring = [(0.12 * math.cos(math.radians(a)), 0.12 * math.sin(math.radians(a))) for a in range(0, 360, 15)]
+    radii = wall_profile(ring, center)
+    assert max(radii) - min(radii) < 1e-3
+    assert max(abs(radii[i - 1] - 2 * radii[i] + radii[(i + 1) % len(radii)]) for i in range(len(radii))) < 1e-4
+
+
+def test_widen_torso_scales_the_ribcage_but_not_the_arms_or_the_flank_seam():
+    everywhere = Lobe(0.0, (180.0, 181.0), 0.14, 0.26, 0.26, 0.46)  # full at the fold
+    seam = Lobe(FRONT + math.pi / 2, (30.0, 60.0), 0.26, 0.35, 10.35, 11.35)  # one flank
+    front, flank = _at(0, z=0.26), _at(90, z=0.40)
+    arm = _at(90, z=0.30)
+    out = widen_torso([front, flank, arm], [1.0, 1.0, 0.0], (0.0, 0.0), everywhere, 1.1, (seam,))
+    assert math.hypot(*out[0][:2]) == pytest.approx(0.18 * 1.1)  # full strength at the fold
+    assert out[1] == pytest.approx(flank)                        # seam: armpit doesn't move
+    assert out[2] == arm                                         # 0 torso weight
+
+
+def test_widen_torso_fades_in_below_the_fold():
+    everywhere = Lobe(0.0, (180.0, 181.0), 0.14, 0.26, 0.26, 0.46)
+    low, waist = _at(0, z=0.20), _at(0, z=0.10)
+    out = widen_torso([low, waist], [1.0, 1.0], (0.0, 0.0), everywhere, 1.1)
+    assert 0.18 < math.hypot(*out[0][:2]) < 0.18 * 1.1
+    assert out[1] == waist

@@ -13,9 +13,11 @@ Everything is copied byte for byte from the user's own original binaries in
 `<source>/<ped>.yft|.ymt|<ped>/` -- the .ymt holds no name, so renaming the
 ped is renaming the files. Only the .ydd files the reshape actually moves are
 regenerated: each original binary is exported to CodeWalker-XML on its own,
-the reshape is replayed on it (every LOD -- Blender only ever imported the
-High one -- normals and tangents carried through the deformation's
-Jacobian, bounds grown), then converted back with codewalker-cli. Nothing
+the reshape is replayed on it as Blender baked it (reshape_ped_xml: the
+skin components on every LOD -- Blender only ever imported the High one --
+normals and tangents carried through the deformation's Jacobian; every other
+component follows the skin under it; bounds grown), then converted back with
+codewalker-cli. Nothing
 goes through a Sollumz export: names, shaders, embedded textures and
 skinning stay the original ones.
 
@@ -40,7 +42,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from body_morphology import Deformation, region_weight  # noqa: E402
+from body_morphology import (  # noqa: E402
+    SKIN_COMPONENTS, Deformation, carry_normal, carry_tangent, deform_with_jacobians, follow_skin, region_weight,
+)
 from codewalker_convert import convert_xml_to_binary, export_binary_to_xml  # noqa: E402
 from layered_ped_builder import bone_group_remap, skeleton_bone_names  # noqa: E402
 
@@ -53,7 +57,6 @@ class PackageError(Exception):
 LAYOUT_SIZES = {"Position": 3, "BlendWeights": 4, "BlendIndices": 4, "Normal": 3,
                 "Colour0": 4, "Colour1": 4, "Tangent": 4, "Binormal": 4,
                 **{f"TexCoord{i}": 2 for i in range(8)}}
-FD_STEP = 1e-4        # m, finite-difference step of the Jacobian
 MOVED_EPSILON = 1e-7  # m, below that a vertex is left byte-identical
 PED_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -71,88 +74,6 @@ def _palette_names(skeleton_names, declared_count, bone_ids):
     return [names[i] for i in bone_ids] if bone_ids else names
 
 
-def _transform(deformations, weight_lists, points):
-    for d, w in zip(deformations, weight_lists):
-        points = d.apply(points, w)
-    return points
-
-
-def _inverse_transpose(j):
-    """Adjugate-transpose (= det * J^-T) of a 3x3 row-major Jacobian: enough
-    to carry a normal, which is renormalized anyway."""
-    (a, b, c), (d, e, f), (g, h, i) = j
-    return ((e * i - f * h, f * g - d * i, d * h - e * g),
-            (c * h - b * i, a * i - c * g, b * g - a * h),
-            (b * f - c * e, c * d - a * f, a * e - b * d))
-
-
-def _mul(m, v):
-    return tuple(sum(m[r][k] * v[k] for k in range(3)) for r in range(3))
-
-
-def _unit(v):
-    n = math.sqrt(sum(c * c for c in v))
-    return tuple(c / n for c in v) if n > 0 else tuple(v)
-
-
-def _geometry_deform(geometry, deformations, skeleton_names, declared_count):
-    """Deform one <Geometries><Item> in place. Returns (moved count,
-    new bbox min, new bbox max) of its positions."""
-    vb = geometry.find("VertexBuffer")
-    layout = [el.tag for el in vb.find("Layout")]
-    unknown = [t for t in layout if t not in LAYOUT_SIZES]
-    if unknown:
-        raise PackageError(f"unknown vertex elements {unknown}")
-    offsets, at = {}, 0
-    for tag in layout:
-        offsets[tag] = at
-        at += LAYOUT_SIZES[tag]
-    data = vb.find("Data2") if vb.find("Data2") is not None else vb.find("Data")
-    lines = data.text.split("\n")
-    rows = [(k, line.split()) for k, line in enumerate(lines) if line.strip()]
-    if any(len(tokens) != at for _k, tokens in rows):
-        raise PackageError(f"vertex line length != layout {layout} ({at} values)")
-    for needed in ("Position", "BlendWeights", "BlendIndices"):
-        if needed not in offsets:
-            raise PackageError(f"geometry without {needed}: can't weight the reshape")
-
-    bone_ids = [int(x) for x in (geometry.findtext("BoneIDs") or "").replace(",", " ").split()]
-    palette = _palette_names(skeleton_names, declared_count, bone_ids)
-    po, wo, io = offsets["Position"], offsets["BlendWeights"], offsets["BlendIndices"]
-    points = [tuple(float(t) for t in tokens[po:po + 3]) for _k, tokens in rows]
-    influences = [[(palette[int(tokens[io + n])], int(tokens[wo + n]) / 255.0) for n in range(4)
-                   if int(tokens[wo + n])] for _k, tokens in rows]
-    weight_lists = [[region_weight(inf, d.prefixes) for inf in influences] for d in deformations]
-
-    moved = _transform(deformations, weight_lists, points)
-    probes = [_transform(deformations, weight_lists,
-                         [tuple(c + (FD_STEP if a == axis else 0.0) for a, c in enumerate(p)) for p in points])
-              for axis in range(3)]
-    count = 0
-    for v, ((k, tokens), old, new) in enumerate(zip(rows, points, moved)):
-        if max(abs(n - o) for n, o in zip(new, old)) <= MOVED_EPSILON:
-            continue
-        count += 1
-        # column `axis` of J = d new / d axis
-        jac = tuple(tuple((probes[axis][v][r] - new[r]) / FD_STEP for axis in range(3)) for r in range(3))
-        tokens[po:po + 3] = [_fmt(c) for c in new]
-        if "Normal" in offsets:
-            no = offsets["Normal"]
-            normal = _unit(_mul(_inverse_transpose(jac), [float(t) for t in tokens[no:no + 3]]))
-            tokens[no:no + 3] = [_fmt(c) for c in normal]
-        if "Tangent" in offsets:
-            to = offsets["Tangent"]
-            tangent = _unit(_mul(jac, [float(t) for t in tokens[to:to + 3]]))
-            tokens[to:to + 3] = [_fmt(c) for c in tangent]
-        indent = lines[k][:len(lines[k]) - len(lines[k].lstrip())]
-        lines[k] = indent + "   ".join(" ".join(tokens[offsets[t]:offsets[t] + LAYOUT_SIZES[t]]) for t in layout)
-    if count:
-        data.text = "\n".join(lines)
-    lo = tuple(min(p[a] for p in moved) for a in range(3))
-    hi = tuple(max(p[a] for p in moved) for a in range(3))
-    return count, lo, hi
-
-
 def _set_xyz(el, xyz):
     for axis, v in zip("xyz", xyz):
         el.set(axis, _fmt(v))
@@ -162,32 +83,129 @@ def _xyz(el):
     return tuple(float(el.get(a)) for a in "xyz")
 
 
-def deform_drawable_dictionary(root: ET.Element, deformations, skeleton_names) -> int:
-    """Replay `deformations` on every geometry of every LOD of every drawable
-    of a parsed .ydd.xml, in place. Returns the number of moved vertices;
-    bounds are only touched when something moved (grown, never shrunk --
-    a too-large bound only costs culling, a too-small one pops). The
-    drawable's own bounds are NOT in the geometries' frame (CatalinaNude
-    lowr: drawable z 0.03..1.10, geometry -0.94..0.08): they only grow by
-    as much as the geometries' bounds did."""
-    total = 0
+class _Geometry:
+    """One <Geometries><Item> of a parsed .ydd.xml: positions (and normals,
+    tangents) are edited in memory, written back by flush() -- only the
+    vertices that ended up moved, so the others stay byte-identical."""
+
+    def __init__(self, element, skeleton_names, declared_count, high):
+        self.element, self.high = element, high
+        vb = element.find("VertexBuffer")
+        self.layout = [el.tag for el in vb.find("Layout")]
+        unknown = [t for t in self.layout if t not in LAYOUT_SIZES]
+        if unknown:
+            raise PackageError(f"unknown vertex elements {unknown}")
+        self.offsets, at = {}, 0
+        for tag in self.layout:
+            self.offsets[tag] = at
+            at += LAYOUT_SIZES[tag]
+        if "Position" not in self.offsets:
+            raise PackageError("geometry without Position")
+        self.data = vb.find("Data2") if vb.find("Data2") is not None else vb.find("Data")
+        self.lines = self.data.text.split("\n")
+        self.rows = [(k, line.split()) for k, line in enumerate(self.lines) if line.strip()]
+        if any(len(tokens) != at for _k, tokens in self.rows):
+            raise PackageError(f"vertex line length != layout {self.layout} ({at} values)")
+        po = self.offsets["Position"]
+        self.original = [tuple(float(t) for t in tokens[po:po + 3]) for _k, tokens in self.rows]
+        self.points = list(self.original)
+        self.normals = self._vectors("Normal", 3)
+        self.tangents = self._vectors("Tangent", 3)
+        self.influences = None
+        if "BlendWeights" in self.offsets and "BlendIndices" in self.offsets:
+            bone_ids = [int(x) for x in (element.findtext("BoneIDs") or "").replace(",", " ").split()]
+            palette = _palette_names(skeleton_names, declared_count, bone_ids)
+            wo, io = self.offsets["BlendWeights"], self.offsets["BlendIndices"]
+            self.influences = [[(palette[int(tokens[io + n])], int(tokens[wo + n]) / 255.0) for n in range(4)
+                                if int(tokens[wo + n])] for _k, tokens in self.rows]
+
+    def _vectors(self, tag, size):
+        if tag not in self.offsets:
+            return None
+        o = self.offsets[tag]
+        return [[float(t) for t in tokens[o:o + size]] for _k, tokens in self.rows]
+
+    def deform(self, deformation):
+        """Skin: the analytic reshape, normals/tangents through its Jacobian."""
+        if self.influences is None:
+            raise PackageError("skin geometry without BlendWeights/BlendIndices: can't weight the reshape")
+        weights = [region_weight(inf, deformation.prefixes) for inf in self.influences]
+        moved, jacobians = deform_with_jacobians(deformation, self.points, weights)
+        for v, jac in jacobians.items():
+            if self.normals is not None:
+                self.normals[v] = list(carry_normal(jac, self.normals[v]))
+            if self.tangents is not None:
+                self.tangents[v] = list(carry_tangent(jac, self.tangents[v]))
+        self.points = moved
+
+    def follow(self, skin_from, skin_to):
+        """Non-skin: translate with the skin under it (body_morphology.follow_skin)."""
+        self.points = follow_skin(self.points, skin_from, skin_to)
+
+    def moved_count(self):
+        return sum(1 for a, b in zip(self.original, self.points)
+                   if max(abs(x - y) for x, y in zip(a, b)) > MOVED_EPSILON)
+
+    def flush(self):
+        """Write moved vertices back; grow the geometry box. Returns the
+        growth (lo, hi) per axis, or None if nothing moved."""
+        po = self.offsets["Position"]
+        count = 0
+        for v, ((k, tokens), old, new) in enumerate(zip(self.rows, self.original, self.points)):
+            if max(abs(x - y) for x, y in zip(old, new)) <= MOVED_EPSILON:
+                continue
+            count += 1
+            tokens[po:po + 3] = [_fmt(c) for c in new]
+            for tag, vectors in (("Normal", self.normals), ("Tangent", self.tangents)):
+                if vectors is not None:
+                    o = self.offsets[tag]
+                    tokens[o:o + 3] = [_fmt(c) for c in vectors[v]]
+            indent = self.lines[k][:len(self.lines[k]) - len(self.lines[k].lstrip())]
+            self.lines[k] = indent + "   ".join(" ".join(tokens[self.offsets[t]:self.offsets[t] + LAYOUT_SIZES[t]])
+                                                for t in self.layout)
+        if not count:
+            return None
+        self.data.text = "\n".join(self.lines)
+        lo = tuple(min(p[a] for p in self.points) for a in range(3))
+        hi = tuple(max(p[a] for p in self.points) for a in range(3))
+        box_lo, box_hi = self.element.find("BoundingBoxMin"), self.element.find("BoundingBoxMax")
+        old_lo, old_hi = _xyz(box_lo), _xyz(box_hi)
+        _set_xyz(box_lo, tuple(map(min, old_lo, lo)))
+        _set_xyz(box_hi, tuple(map(max, old_hi, hi)))
+        return ([max(0.0, a - b) for a, b in zip(old_lo, lo)], [max(0.0, b - a) for a, b in zip(old_hi, hi)])
+
+
+_LODS = ("DrawableModelsHigh", "DrawableModelsMedium", "DrawableModelsLow", "DrawableModelsVeryLow")
+
+
+def _geometries(root, skeleton_names):
+    """[(drawable element, [_Geometry])] of a parsed .ydd.xml, every LOD."""
+    out = []
     for drawable in root.findall("Item"):
-        grow_lo, grow_hi = [0.0] * 3, [0.0] * 3
-        for lod in ("DrawableModelsHigh", "DrawableModelsMedium", "DrawableModelsLow", "DrawableModelsVeryLow"):
+        geoms = []
+        for lod in _LODS:
             for model in drawable.findall(f"{lod}/Item"):
                 declared = int(model.find("Unknown1").get("value"))
-                for geometry in model.findall("Geometries/Item"):
-                    count, lo, hi = _geometry_deform(geometry, deformations, skeleton_names, declared)
-                    if not count:
-                        continue
-                    total += count
-                    box_lo, box_hi = geometry.find("BoundingBoxMin"), geometry.find("BoundingBoxMax")
-                    old_lo, old_hi = _xyz(box_lo), _xyz(box_hi)
-                    for a in range(3):
-                        grow_lo[a] = max(grow_lo[a], old_lo[a] - lo[a])
-                        grow_hi[a] = max(grow_hi[a], hi[a] - old_hi[a])
-                    _set_xyz(box_lo, tuple(map(min, old_lo, lo)))
-                    _set_xyz(box_hi, tuple(map(max, old_hi, hi)))
+                geoms += [_Geometry(g, skeleton_names, declared, lod == "DrawableModelsHigh")
+                          for g in model.findall("Geometries/Item")]
+        out.append((drawable, geoms))
+    return out
+
+
+def _flush(drawables) -> int:
+    """Write every geometry back; the drawable's own bounds are NOT in the
+    geometries' frame (CatalinaNude lowr: drawable z 0.03..1.10, geometry
+    -0.94..0.08): they grow by as much as the geometries' did (never
+    shrink -- a too-large bound only costs culling, a too-small one pops)."""
+    total = 0
+    for drawable, geoms in drawables:
+        grow_lo, grow_hi = [0.0] * 3, [0.0] * 3
+        for g in geoms:
+            total += g.moved_count()
+            growth = g.flush()
+            if growth:
+                grow_lo = list(map(max, grow_lo, growth[0]))
+                grow_hi = list(map(max, grow_hi, growth[1]))
         if not any(grow_lo + grow_hi):
             continue
         box_lo, box_hi = drawable.find("BoundingBoxMin"), drawable.find("BoundingBoxMax")
@@ -201,34 +219,62 @@ def deform_drawable_dictionary(root: ET.Element, deformations, skeleton_names) -
     return total
 
 
+def reshape_ped_xml(roots: dict, deformations, skeleton_names) -> dict:
+    """Replay `deformations` on a ped's parsed .ydd.xml roots ({component:
+    root}), in place, exactly as body_morphology._write baked them in
+    Blender: for each deformation in order, the SKIN_COMPONENTS get the
+    analytic reshape (every LOD), then every other component follows the
+    skin's High-LOD displacement (the only LOD Blender imported). Returns
+    {component: moved vertex count}."""
+    parsed = {c: _geometries(root, skeleton_names) for c, root in roots.items()}
+    skin = [c for c in parsed if c in SKIN_COMPONENTS]
+    for deformation in deformations:
+        skin_from, skin_to = [], []
+        for c in skin:
+            for _drawable, geoms in parsed[c]:
+                for g in geoms:
+                    before = g.points
+                    g.deform(deformation)
+                    if g.high:
+                        skin_from += before
+                        skin_to += g.points
+        for c in parsed:
+            if c not in skin:
+                for _drawable, geoms in parsed[c]:
+                    for g in geoms:
+                        g.follow(skin_from, skin_to)
+    return {c: _flush(drawables) for c, drawables in parsed.items()}
+
+
 def _texture_files(root: ET.Element) -> list[str]:
     """Embedded texture .dds files a .ydd.xml needs next to it to convert."""
     return [name for name in (el.findtext("FileName") for el in root.iter("Item")
                               if el.find("Usage") is not None) if name]
 
 
-def _reshaped_ydd(original: Path, deformations, skeleton_names, work: Path) -> tuple[int, Path | None]:
-    """(moved vertices, regenerated binary .ydd or None if nothing moved)
-    for the original binary `original`, exported alone (see module doc)."""
-    stem = original.name[:-len(".ydd")]
-    src = work / stem / "xml"
+def _export(original: Path, work: Path) -> Path:
+    """Export ONE original binary .ydd to CodeWalker-XML in its own folder
+    (with its own embedded .dds -- see module doc). Returns the .ydd.xml."""
+    src = work / original.name[:-len(".ydd")] / "xml"
     exported = export_binary_to_xml(original, src)
     xml_path = src / f"{original.name}.xml"
     if exported.status != "converted" or not xml_path.is_file():
         raise PackageError(f"codewalker-cli export of {original} failed: {exported.status} {exported.message}")
-    tree = ET.parse(xml_path)
-    moved = deform_drawable_dictionary(tree.getroot(), deformations, skeleton_names)
-    if not moved:
-        return 0, None
+    return xml_path
+
+
+def _convert(xml_path: Path, tree: ET.ElementTree) -> Path:
     tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
+    src = xml_path.parent
     missing = [t for t in _texture_files(tree.getroot()) if not (src / t).is_file()]
     if missing:
-        raise PackageError(f"{original.name}: embedded textures not exported: {missing}")
-    result = convert_xml_to_binary(src, work / stem / "bin", stem, extensions=(".ydd",))
-    binary = work / stem / "bin" / f"{stem}.ydd"
+        raise PackageError(f"{xml_path.name}: embedded textures not exported: {missing}")
+    stem = xml_path.name[:-len(".ydd.xml")]
+    result = convert_xml_to_binary(src, src.parent / "bin", stem, extensions=(".ydd",))
+    binary = src.parent / "bin" / f"{stem}.ydd"
     if result.status != "converted" or not binary.is_file():
         raise PackageError(f"codewalker-cli conversion of {xml_path.name} failed: {result.status} {result.message}")
-    return moved, binary
+    return binary
 
 
 def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> dict:
@@ -250,37 +296,43 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
     skeleton_names = skeleton_bone_names(Path(spec["skeleton_yft"])) if deformations else []
 
     top_tier = Path(spec["ped_root"]) / ped
-    reshaped, unchanged = {}, []
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out, prefix=f".{name}.") as tmp:
         work = Path(tmp)
+        # component -> (tree, exported .ydd.xml or None if not one of <ped>'s own files)
+        loaded = {}
         for component, xml in sorted(spec["components"].items()):
             xml = Path(xml)
             if not xml.name.endswith(".ydd.xml") or not deformations:
                 continue
-            # The shipped ped is <ped>'s own folder: a component fitted from
-            # a lower tier or a body donor has no slot in it -- fine as long
-            # as the reshape doesn't move it (positions don't depend on the
-            # flat folder's texture collisions, its XML is enough to tell).
             if os.path.abspath(xml.parent) != os.path.abspath(top_tier):
-                if deform_drawable_dictionary(ET.parse(xml).getroot(), deformations, skeleton_names):
-                    raise PackageError(f"{component} ({xml}) is reshaped but isn't one of {ped}'s own files")
-                unchanged.append(component)
+                # A lower tier or a body donor has no slot in the shipped
+                # folder -- fine as long as it doesn't move (positions don't
+                # depend on the flat folder's texture collisions).
+                loaded[component] = (ET.parse(xml), None)
                 continue
             original = originals["dir"] / xml.name[:-len(".xml")]
             if not original.is_file():
                 raise PackageError(f"no original binary {original} for {xml.name}")
-            moved, binary = _reshaped_ydd(original, deformations, skeleton_names, work)
-            if moved:
-                reshaped[original.name] = (moved, binary)
-            else:
-                unchanged.append(component)
+            exported = _export(original, work)
+            loaded[component] = (ET.parse(exported), exported)
+        moved = reshape_ped_xml({c: tree.getroot() for c, (tree, _x) in loaded.items()},
+                                deformations, skeleton_names)
+        reshaped, unchanged = {}, sorted(c for c, n in moved.items() if not n)
+        for component, count in sorted(moved.items()):
+            if not count:
+                continue
+            tree, exported = loaded[component]
+            if exported is None:
+                raise PackageError(f"{component} ({spec['components'][component]}) is reshaped but "
+                                   f"isn't one of {ped}'s own files")
+            reshaped[exported.name[:-len(".xml")]] = (count, _convert(exported, tree))
 
         stage = work / "stage"
         shutil.copytree(originals["dir"], stage / name)
         shutil.copy2(originals["yft"], stage / f"{name}.yft")
         shutil.copy2(originals["ymt"], stage / f"{name}.ymt")
-        for file_name, (_moved, binary) in reshaped.items():
+        for file_name, (_count, binary) in reshaped.items():
             shutil.copy2(binary, stage / name / file_name)
         for target in targets:
             os.replace(stage / target.name, target)
