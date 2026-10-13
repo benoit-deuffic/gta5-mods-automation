@@ -17,7 +17,10 @@ the reshape is replayed on it as Blender baked it (reshape_ped_xml: the
 skin components on every LOD -- Blender only ever imported the High one --
 normals and tangents carried through the deformation's Jacobian; every other
 component follows the skin under it; bounds grown), then converted back with
-codewalker-cli. Nothing
+codewalker-cli. Every other drawable variant of the skin components (the
+build's "variants": uppr_001.., lowr_001.., each with its own fitted
+deformations) is regenerated the same way, and every uppr/lowr pair welded
+at the waist in the originals is checked to still be (seam_report). Nothing
 goes through a Sollumz export: names, shaders, embedded textures and
 skinning stay the original ones.
 
@@ -44,19 +47,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from body_morphology import (  # noqa: E402
     SKIN_COMPONENTS, Deformation, carry_normal, carry_tangent, deform_with_jacobians, follow_skin, region_weight,
+    shared_vertices,
 )
 from codewalker_convert import convert_xml_to_binary, export_binary_to_xml  # noqa: E402
-from layered_ped_builder import bone_group_remap, skeleton_bone_names  # noqa: E402
+from layered_ped_builder import (  # noqa: E402
+    LAYOUT_SIZES, bone_group_remap, component_variants, high_lod_positions, skeleton_bone_names,
+)
 
 
 class PackageError(Exception):
     pass
 
 
-# Tokens per vertex element in a CodeWalker-XML <VertexBuffer><Data2> line.
-LAYOUT_SIZES = {"Position": 3, "BlendWeights": 4, "BlendIndices": 4, "Normal": 3,
-                "Colour0": 4, "Colour1": 4, "Tangent": 4, "Binormal": 4,
-                **{f"TexCoord{i}": 2 for i in range(8)}}
 MOVED_EPSILON = 1e-7  # m, below that a vertex is left byte-identical
 PED_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -277,12 +279,36 @@ def _convert(xml_path: Path, tree: ET.ElementTree) -> Path:
     return binary
 
 
+SEAM_OPEN_MM = 0.1  # a welded uppr/lowr seam whose vertices drift further apart than that is reported
+
+
+def seam_report(skin_points: dict) -> list[dict]:
+    """Pure logic: the waist seams between the shipped skin files.
+    `skin_points` = {file: (component, High-LOD positions before, after)};
+    for every uppr/lowr pair that was welded in the originals
+    (shared_vertices): {"uppr", "lowr", "shared", "gap_before_mm",
+    "gap_after_mm"} -- the largest distance between welded vertices. The
+    game combines any uppr with any lowr, so every pair is checked."""
+    out = []
+    files = sorted(skin_points)
+    for u in (f for f in files if skin_points[f][0] == "uppr"):
+        for lo in (f for f in files if skin_points[f][0] == "lowr"):
+            (_cu, u_before, u_after), (_cl, l_before, l_after) = skin_points[u], skin_points[lo]
+            pairs = shared_vertices(u_before, l_before)
+            if pairs:
+                out.append({"uppr": u, "lowr": lo, "shared": len(pairs),
+                            "gap_before_mm": round(1000 * max(math.dist(u_before[i], l_before[j]) for i, j in pairs), 3),
+                            "gap_after_mm": round(1000 * max(math.dist(u_after[i], l_after[j]) for i, j in pairs), 3)})
+    return out
+
+
 def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> dict:
     if not PED_NAME_RE.match(name):
         raise PackageError(f"invalid ped name {name!r}: letters, digits and _ only")
     spec = json.loads(deformation_json.read_text())
     ped = spec["ped_name"]
     deformations = [Deformation.from_dict(d) for d in spec["deformations"]]
+    variants = spec.get("variants", [])
     originals = {"yft": source / f"{ped}.yft", "ymt": source / f"{ped}.ymt", "dir": source / ped}
     missing = [str(p) for p in originals.values() if not p.exists()]
     if missing:
@@ -299,6 +325,13 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out, prefix=f".{name}.") as tmp:
         work = Path(tmp)
+
+        def own_original(xml: Path) -> Path:
+            original = originals["dir"] / xml.name[:-len(".xml")]
+            if not original.is_file():
+                raise PackageError(f"no original binary {original} for {xml.name}")
+            return original
+
         # component -> (tree, exported .ydd.xml or None if not one of <ped>'s own files)
         loaded = {}
         for component, xml in sorted(spec["components"].items()):
@@ -311,13 +344,17 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
                 # depend on the flat folder's texture collisions).
                 loaded[component] = (ET.parse(xml), None)
                 continue
-            original = originals["dir"] / xml.name[:-len(".xml")]
-            if not original.is_file():
-                raise PackageError(f"no original binary {original} for {xml.name}")
-            exported = _export(original, work)
+            exported = _export(own_original(xml), work)
             loaded[component] = (ET.parse(exported), exported)
+        # shipped skin file -> (component, High-LOD positions before, after): seam check
+        skin_points = {exported.name[:-len(".xml")]: (c, high_lod_positions(tree.getroot()))
+                       for c, (tree, exported) in loaded.items() if c in SKIN_COMPONENTS and exported}
         moved = reshape_ped_xml({c: tree.getroot() for c, (tree, _x) in loaded.items()},
                                 deformations, skeleton_names)
+        for c, (tree, exported) in loaded.items():
+            if c in SKIN_COMPONENTS and exported:
+                file_name = exported.name[:-len(".xml")]
+                skin_points[file_name] += (high_lod_positions(tree.getroot()),)
         reshaped, unchanged = {}, sorted(c for c, n in moved.items() if not n)
         for component, count in sorted(moved.items()):
             if not count:
@@ -328,6 +365,24 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
                                    f"isn't one of {ped}'s own files")
             reshaped[exported.name[:-len(".xml")]] = (count, _convert(exported, tree))
 
+        # The other body variants (import_layered_ped fit_body_variants):
+        # skin only, their own fitted deformations; nothing follows them
+        # (worn items follow the main pair, as in Blender).
+        for variant in variants:
+            xml, component = Path(variant["xml"]), variant["component"]
+            if component not in SKIN_COMPONENTS or os.path.abspath(xml.parent) != os.path.abspath(top_tier):
+                raise PackageError(f"variant {xml} is not one of {ped}'s own skin drawables")
+            exported = _export(own_original(xml), work)
+            tree = ET.parse(exported)
+            file_name = exported.name[:-len(".xml")]
+            before = high_lod_positions(tree.getroot())
+            count = reshape_ped_xml({component: tree.getroot()},
+                                    [Deformation.from_dict(d) for d in variant["deformations"]],
+                                    skeleton_names)[component]
+            skin_points[file_name] = (component, before, high_lod_positions(tree.getroot()))
+            if count:
+                reshaped[file_name] = (count, _convert(exported, tree))
+
         stage = work / "stage"
         shutil.copytree(originals["dir"], stage / name)
         shutil.copy2(originals["yft"], stage / f"{name}.yft")
@@ -336,8 +391,15 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
             shutil.copy2(binary, stage / name / file_name)
         for target in targets:
             os.replace(stage / target.name, target)
+    # every drawable the .ymt can pick for a skin slot, reshaped or not
+    skin_files = sorted(p.name for c in SKIN_COMPONENTS if c in spec["components"] and deformations
+                        for p in component_variants(originals["dir"] / Path(spec["components"][c]).name[:-len(".xml")]))
     return {"output": [str(t) for t in targets], "reshaped": {f: m for f, (m, _b) in reshaped.items()},
-            "unchanged_components": unchanged}
+            "unchanged_components": unchanged,
+            "unreshaped_skin_variants": [f for f in skin_files if f not in reshaped],
+            "variants": [{"file": Path(v["xml"]).name[:-len(".xml")],
+                          **{k: v.get(k) for k in ("bust", "glutes", "reached")}} for v in variants],
+            "seams": seam_report(skin_points)}
 
 
 def main(argv=None) -> int:
@@ -357,6 +419,22 @@ def main(argv=None) -> int:
     for file_name, moved in report["reshaped"].items():
         print(f"[OK] reshaped {file_name}: {moved} vertices (all LODs)")
     print(f"[INFO] unchanged components (original binaries): {report['unchanged_components']}")
+    for v in report["variants"]:
+        bust, glutes = v.get("bust"), v.get("glutes")
+        line = (f"bust {bust['underbust_cm']}/{bust['bust_cm']} cm (~{bust['size']}, target {bust['target_bust_cm']})"
+                if bust else "")
+        if glutes:
+            r = glutes["result"]
+            line += (f"; glutes ({glutes['how']}) " + (f"lateral {r['lateral_whr']} posterior {r['posterior_whr']} "
+                                                      f"apex {r['apex_position']}" if r else "not measurable")
+                     + f", targets {glutes['targets']}")
+        print(f"[{'OK' if v['reached'] else 'WARN'}] variant {v['file']} (measured in the build): {line}")
+    if report["unreshaped_skin_variants"]:
+        print(f"[WARN] skin variants shipped UNRESHAPED (original body in game): {report['unreshaped_skin_variants']}")
+    for seam in report["seams"]:
+        opened = seam["gap_after_mm"] - seam["gap_before_mm"] > SEAM_OPEN_MM
+        print(f"[{'WARN' if opened else 'OK'}] seam {seam['uppr']} / {seam['lowr']}: {seam['shared']} welded vertices, "
+              f"max gap {seam['gap_before_mm']} -> {seam['gap_after_mm']} mm")
     print(f"[OK] {', '.join(report['output'])}")
     return 0
 

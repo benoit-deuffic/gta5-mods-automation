@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import bpy
@@ -43,11 +44,14 @@ import blender_rig_export as bre  # noqa: E402
 import body_morphology  # noqa: E402
 from layered_ped_builder import (  # noqa: E402
     bone_group_remap,
+    component_variants,
     declared_bone_counts,
+    high_lod_positions,
     resolve_layered_components,
     resolve_component_diffuse,
     resolve_layered_components_with_body_donor,
     skeleton_bone_names,
+    skin_variant_combos,
 )
 
 
@@ -141,11 +145,15 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
                        extra_texture_roots: tuple[str, ...] = (),
                        generic_skin_root: str | None = None,
                        ethnicity: str = "whi",
-                       fallback_skeleton_yft: str | None = None) -> dict:
+                       fallback_skeleton_yft: str | None = None,
+                       component_files: dict | None = None) -> dict:
     """The bpy-dependent orchestration: resolve layers, import, rig, relink
     textures. Returns a stats dict for the caller to report/log. Split out
     from main() so a test can call it with a fake bpy and assert on the
     call sequence without needing a real Blender process.
+
+    `component_files` ({component: drawable path}) replaces the resolved
+    file of those components -- e.g. another body variant (uppr_003).
 
     `body_donor_root`, when given, is a directory of already-exported
     CodeWalker-XML files (.ydd.xml) for a DIFFERENT ped chosen purely for
@@ -163,6 +171,7 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
     else:
         resolved = resolve_layered_components(Path(ped_root), ped_name,
                                                extensions=(".ydd.xml",))
+    resolved.update({comp: Path(p) for comp, p in (component_files or {}).items()})
     stats: dict = {"resolved_components": {comp: str(p) for comp, p in resolved.items()}}
 
     bpy.ops.wm.open_mainfile(filepath=template_path)
@@ -212,6 +221,8 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
         new_meshes_by_component[component] = [
             o for o in (set(bpy.data.objects) - before_this_import) if o.type == 'MESH'
         ]
+        for obj in new_meshes_by_component[component]:
+            obj[body_morphology.PED_COMPONENT_PROP] = component
     stats["failed_imports"] = failed_imports
 
     # Components whose bone palette uses the facial-less bone order (MP
@@ -435,6 +446,85 @@ def _hips_line(m) -> str:
             f"(~{m['shape']}); apex at {m['apex_position']} of cleft-to-fold (~{m['height']})")
 
 
+SEAM_MIN_VERTICES = 8  # welded vertices for two skin variants to count as sharing their waist seam
+
+
+def fit_body_variants(args, build_kwargs, main_stats, glute_fit) -> list[dict]:
+    """bpy: the same body targets on every OTHER drawable variant of the
+    skin components (the .ymt picks among uppr_000..005 / lowr_000..002 in
+    game; only the lowest pair was built). Each variant is rebuilt with its
+    seam partner (layered_ped_builder.skin_variant_combos) and:
+    - the bust is fitted again on it: the variants' breasts differ (80D to
+      80>H on CatalinaNude) and replaying the main fit missed 90C by -8.5
+      to +5.1 cm; the bust field stays far above the waist seam;
+    - the glute field, which crosses the seam, is the main one replayed
+      (replay_glutes) on every variant welded to a main file -- any uppr is
+      worn with any lowr, one field keeps every seam closed -- and fitted
+      again only on a pair welded to neither (its own body).
+    Returns one entry per variant file: {"component", "xml", "built_with",
+    "deformations" (bake order), "bust", "glutes", "reached"}; a variant
+    whose fit failed is left out (shipped unreshaped, ped_package warns)."""
+    skin = body_morphology.SKIN_COMPONENTS
+    main = {c: Path(main_stats["resolved_components"].get(c, "")) for c in skin}
+    top_tier = (Path(args.ped_root) / args.ped_name).resolve()
+    if args.body_donor_root or any(p.parent.resolve() != top_tier for p in main.values()):
+        print(f"[INFO] body variants: {[str(p) for p in main.values()]} not all {args.ped_name}'s own "
+              f"drawables, other variants not fitted")
+        return []
+    variants = {c: component_variants(main[c]) for c in skin}
+    positions = {p: high_lod_positions(ET.parse(p).getroot()) for paths in variants.values() for p in paths}
+    combos = skin_variant_combos(variants, lambda u, lo: len(body_morphology.shared_vertices(
+        positions[u], positions[lo])) >= SEAM_MIN_VERTICES)
+    out = []
+    for combo in combos[1:]:
+        names = " + ".join(combo[c].name[:-len(".ydd.xml")] for c in skin)
+        stats = build_layered_ped(args.template, args.ped_root, args.ped_name, component_files=combo,
+                                  **build_kwargs)
+        if stats.get("error") or stats["failed_imports"]:
+            print(f"[WARN] variant {names}: build failed ({stats.get('error') or stats['failed_imports']}), "
+                  f"not reshaped")
+            continue
+        armature = bpy.data.objects[stats["armature"]]
+        deformations, report = [], {}
+        if args.bust_size:
+            fit = body_morphology.fit_bust(armature, args.bust_size)
+            if "error" in fit:
+                print(f"[WARN] variant {names}: bust fit failed ({fit['error']}), not reshaped")
+                continue
+            deformations.append(fit["deformation"])
+            report["bust"] = {**fit["result"], "target_bust_cm": fit["target_bust_cm"], "reached": fit["reached"]}
+        if glute_fit is not None:
+            if any(combo[c] == main[c] for c in skin):
+                fit = body_morphology.replay_glutes(armature, glute_fit["deformation"], glute_fit["targets"])
+                fit["deformation"], how = glute_fit["deformation"], "main fit replayed"
+            else:
+                fit = body_morphology.fit_glutes(armature, args.glutes, args.glute_height)
+                how = "fitted on this pair"
+            if "error" in fit:
+                print(f"[WARN] variant {names}: glutes failed ({fit['error']}), not reshaped")
+                continue
+            deformations.append(fit["deformation"])
+            report["glutes"] = {"how": how, "targets": glute_fit["targets"], "result": fit["result"],
+                                "reached": fit["reached"]}
+        reached = all(r["reached"] for r in report.values())
+        bust, glutes = report.get("bust"), report.get("glutes")
+        print(f"[VARIANT] {names}: "
+              + (f"bust {bust['underbust_cm']}/{bust['bust_cm']} cm (~{bust['size']}, target "
+                 f"{bust['target_bust_cm']}); " if bust else "")
+              + (f"glutes {glutes['how']}: " + (_hips_line(glutes["result"]) if glutes["result"] else
+                                                "not measurable") if glutes else ""))
+        if not reached:
+            print(f"[WARN] variant {names} misses the targets: "
+                  + "; ".join(f"{k} {r.get('target_bust_cm', r.get('targets'))}" for k, r in report.items()
+                              if not r["reached"]))
+        for c in skin:
+            if combo[c] != main[c] and os.path.abspath(combo[c]) not in {v["xml"] for v in out}:
+                out.append({"component": c, "xml": os.path.abspath(combo[c]),
+                            "built_with": os.path.abspath(combo[[o for o in skin if o != c][0]]),
+                            "deformations": [d.to_dict() for d in deformations], **report, "reached": reached})
+    return out
+
+
 def main():
     args = parse_args()
     sliders = body_morphology.parse_slider_spec(args.morphs) if args.morphs else {}
@@ -447,13 +537,10 @@ def main():
     donor_components = tuple(c.strip() for c in args.body_donor_components.split(",") if c.strip())
     extra_roots = tuple(r.strip() for r in args.extra_texture_roots.split(",") if r.strip()) \
         if args.extra_texture_roots else ()
-    stats = build_layered_ped(args.template, args.ped_root, args.ped_name,
-                               body_donor_root=args.body_donor_root,
-                               body_donor_components=donor_components,
-                               extra_texture_roots=extra_roots,
-                               generic_skin_root=args.generic_skin_root,
-                               ethnicity=args.ethnicity,
-                               fallback_skeleton_yft=args.skeleton_yft)
+    build_kwargs = dict(body_donor_root=args.body_donor_root, body_donor_components=donor_components,
+                        extra_texture_roots=extra_roots, generic_skin_root=args.generic_skin_root,
+                        ethnicity=args.ethnicity, fallback_skeleton_yft=args.skeleton_yft)
+    stats = build_layered_ped(args.template, args.ped_root, args.ped_name, **build_kwargs)
 
     print("[INFO] Resolved components:")
     for comp, path in stats.get("resolved_components", {}).items():
@@ -501,6 +588,7 @@ def main():
 
     armature = bpy.data.objects[stats["armature"]]
     deformations = []  # in the order they were baked
+    glute_fit = None
     if args.bust_size:
         fit = body_morphology.fit_bust(armature, args.bust_size)
         if "error" in fit:
@@ -530,7 +618,7 @@ def main():
             print(f"[BUST] underbust {chest['underbust_cm']} cm, bust {chest['bust_cm']} cm (~{chest['size']})")
 
     if args.glutes or args.glute_height:
-        fit = body_morphology.fit_glutes(armature, args.glutes, args.glute_height)
+        fit = glute_fit = body_morphology.fit_glutes(armature, args.glutes, args.glute_height)
         if "error" in fit:
             print(f"[FAIL] glute fit: {fit['error']}")
             sys.exit(1)
@@ -551,20 +639,23 @@ def main():
     Path(args.output_blend).parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=args.output_blend)
     print(f"[OK] Saved {args.output_blend}")
+    if args.preview_png:
+        Path(args.preview_png).parent.mkdir(parents=True, exist_ok=True)
+        render_preview(stats["new_meshes"], args.preview_png)
+        print(f"[OK] Rendered preview to {args.preview_png}")
+
     if args.deformation_out:
+        # last: each variant rebuilds the scene (the .blend keeps the main pair)
+        variants = fit_body_variants(args, build_kwargs, stats, glute_fit) if deformations else []
         out = Path(args.deformation_out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({
             "ped_root": os.path.abspath(args.ped_root), "ped_name": args.ped_name,
             "skeleton_yft": stats["skeleton_yft"] and os.path.abspath(stats["skeleton_yft"]),
             "components": {c: os.path.abspath(p) for c, p in stats["resolved_components"].items()},
-            "deformations": [d.to_dict() for d in deformations]}, indent=1))
+            "deformations": [d.to_dict() for d in deformations],
+            "variants": variants}, indent=1))
         print(f"[OK] Saved {out}")
-
-    if args.preview_png:
-        Path(args.preview_png).parent.mkdir(parents=True, exist_ok=True)
-        render_preview(stats["new_meshes"], args.preview_png)
-        print(f"[OK] Rendered preview to {args.preview_png}")
 
 
 if __name__ == "__main__":

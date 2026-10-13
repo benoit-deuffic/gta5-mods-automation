@@ -648,6 +648,7 @@ ARM_BONE_PREFIXES = ("SKEL_L_UpperArm", "SKEL_R_UpperArm", "RB_L_ArmRoll", "RB_R
 # reshaped on its own excess -- a necklace lying on the upper chest was
 # scaled toward the wall like skin, closing its gap to the skin.
 SKIN_COMPONENTS = ("uppr", "lowr")
+PED_COMPONENT_PROP = "ped_component"  # Blender object property: component code of the file a mesh came from
 FOLLOW_REACH = 0.03  # m: farther than that from any skin vertex, a point doesn't move
 
 
@@ -691,6 +692,31 @@ def follow_skin(points, skin_from, skin_to, reach=FOLLOW_REACH):
             a, b = skin_from[best], skin_to[best]
             out.append(tuple(p[k] + b[k] - a[k] for k in range(3)))
     return out
+
+
+SEAM_TOLERANCE = 5e-4  # m: two components' vertices closer than that are welded (a seam)
+
+
+def shared_vertices(a, b, tol=SEAM_TOLERANCE):
+    """Pure logic (no bpy): [(i, j)] -- each point a[i] that lies within
+    `tol` of a point of `b`, with its nearest b[j]: the welded seam between
+    two meshes (CatalinaNude: uppr_000 and lowr_000 share 53 waist vertices,
+    uppr_002 and lowr_002 25, uppr_002 and lowr_000 none)."""
+    def cell(p):
+        return tuple(int(math.floor(c / tol)) for c in p)
+
+    grid = {}
+    for j, q in enumerate(b):
+        grid.setdefault(cell(q), []).append(j)
+    pairs = []
+    for i, p in enumerate(a):
+        cx, cy, cz = cell(p)
+        near = [(math.dist(p, b[j]), j) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                for j in grid.get((cx + dx, cy + dy, cz + dz), ())]
+        near = [(d, j) for d, j in near if d <= tol]
+        if near:
+            pairs.append((i, min(near)[1]))
+    return pairs
 
 
 @dataclass(frozen=True)
@@ -1275,10 +1301,13 @@ def fit_bust(armature, bra_size: str) -> dict:
 
 def _body_meshes(armature):
     """The skin meshes the hips span: the uppr (torso) and lowr (legs)
-    components, recognized by their <comp>_diff_ material."""
+    components -- by the PED_COMPONENT_PROP the builder sets from the file
+    each mesh came from, else by their <comp>_diff_ material. The material
+    alone misses skin: CatalinaNude uppr_002/lowr_002 use
+    mp_fm_skin_f_up_pak / _lo_pak."""
     import blender_rig_export as bre
     return [o for o in _meshes(armature)
-            if (bre.classify_body_component(o) or ("",))[0] in SKIN_COMPONENTS]
+            if (o.get(PED_COMPONENT_PROP) or (bre.classify_body_component(o) or ("",))[0]) in SKIN_COMPONENTS]
 
 
 def _forward(armature):
@@ -1389,6 +1418,53 @@ def measure_hips(armature) -> dict | None:
     points, _weights, edges = _samples(meshes, GLUTE_BONE_PREFIXES)
     m = _measure_hips(points, edges, pelvis_z, forward)
     return _public(m) if m else None
+
+
+# A replayed glute field can't be re-solved on the variant (its seam with
+# the fitted pair would open), so the ratios it gives are accepted within
+# twice the fit tolerance. CatalinaNude 90C + athletic: the variant's own
+# band fit also moves the waist (the band fades 12 cm down from the
+# underbust fold, which differs per variant): 0.787/0.720 and 0.786/0.711
+# for 0.783/0.717 on the fitted pair.
+GLUTE_REPLAY_TOLERANCE = 0.01
+
+
+def glute_targets_missed(result, targets, tolerance=GLUTE_REPLAY_TOLERANCE) -> dict:
+    """Pure logic: {proportion: (target, measured or None)} for each glute
+    target of `targets` (as in fit_glutes' "targets") that `result` misses
+    by more than `tolerance` (GLUTE_HEIGHT_TOLERANCE for the apex position).
+    Empty = all reached."""
+    return {k: (v, result[k] if result else None) for k, v in (targets or {}).items()
+            if not result or abs(result[k] - v) > (GLUTE_HEIGHT_TOLERANCE if k == "apex_position" else tolerance)}
+
+
+def replay_glutes(armature, deformation: Deformation, targets) -> dict:
+    """bpy: bake a glute `deformation` fitted on ANOTHER body (fit_glutes on
+    the main uppr/lowr pair) into this one and measure what it gives, the
+    way fit_glutes measures its own result (gluteal fold carried through
+    the apex shift, not re-detected). For a body variant welded to the
+    fitted pair at the waist: one field for both keeps the seam closed.
+    Returns {"base", "result", "reached"} (result/base None if a landmark
+    isn't found -- the deformation is baked anyway); reached within
+    GLUTE_REPLAY_TOLERANCE."""
+    setup = _glute_setup(armature)
+    if setup is None:
+        return {"error": "no SKEL_Pelvis bone or no uppr/lowr body mesh"}
+    meshes, pelvis_z, forward = setup
+    points, _weights, edges = _samples(meshes, GLUTE_BONE_PREFIXES)
+    base = _measure_hips(points, edges, pelvis_z, forward)
+    _write(armature, deformation)
+    result = None
+    if base is not None:
+        fold_z = base["fold_z"]
+        if deformation.shift is not None:
+            lobe, bottom_z, top_z, delta = deformation.shift
+            fold_z += delta * shift_bump(fold_z, bottom_z, lobe.apex_z, top_z)
+        final = _samples(meshes, GLUTE_BONE_PREFIXES)[0]
+        result = _measure_hips(final, edges, pelvis_z, forward, {"fold_z": fold_z})
+    result = _public(result) if result else None
+    return {"base": _public(base) if base else None, "result": result,
+            "reached": not glute_targets_missed(result, targets)}
 
 
 def _glute_lobes(m, forward):

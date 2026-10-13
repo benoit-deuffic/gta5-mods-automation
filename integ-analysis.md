@@ -3,8 +3,9 @@
 Statut (2026-10-13) : étapes 2 et 3 faites (export + assemblage, `scripts/ped_package.py`, voir
 `docs/architecture-decisions.md` point 38). Validé en jeu le 2026-10-13 par l'utilisateur :
 Alexandra (90C + fesses athletic, `ped_package.py`, installée à la main) fonctionne.
-Restent : variantes 001 à 005, `.oiv` et inscription automatisée. Deux choix restent à faire
-(voir la fin).
+Variantes de corps (2026-10-13, choix a) : toutes les `uppr`/`lowr` sont déformées vers les mêmes
+cibles et livrées (`docs/architecture-decisions.md` point 42), non encore testé en jeu.
+Restent : `.oiv` et inscription automatisée. Deux choix restent à faire (voir la fin).
 
 Sources lues :
 - deux vrais paquets OIV : `Downloads/e41d11-Ped Selector/.../PedSelector.oiv` et
@@ -120,6 +121,5 @@ intégrées et comportement du jeu. Ensuite seulement : LOD, variantes, `.oiv`, 
 
 ## 5. Décisions en attente
 
-- Variantes de corps : toutes déformées (recommandé) ou une seule (régénérer le `.ymt`) ?
 - Inscription `ap_m.xml` : notre script (avec sauvegarde) ou l'éditeur AddonPeds à la main ?
 - Corriger `PoseMatcherName` de l'entrée CatalinaNude existante ?

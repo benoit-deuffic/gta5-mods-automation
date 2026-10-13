@@ -1377,3 +1377,64 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       (99e centile).
     - Limite connue, déjà présente au commit e4cc6be : slim + low n'atteint pas l'apex visé (0,81
       au lieu de 0,60, avec avertissement) et laisse un renflement tombant.
+
+42. **Toutes les variantes de corps déformées (2026-10-13)** : le `.ymt` de CatalinaNude déclare 6
+    `uppr` et 3 `lowr` (les « bodyshapes » du readme) et le jeu tire parmi elles. Jusqu'ici seules
+    `uppr_000`/`lowr_000` étaient ajustées : une autre variante montrait en jeu le 80G d'origine.
+    - **Mesures d'abord** (CatalinaNude, LOD High) :
+      - `lowr_001` = `lowr_000` à l'octet. `uppr_001`/`004` mesurent 80>H (109,8 cm), `uppr_003`/`005`
+        80D (100,9 cm), `uppr_000` 80G. Même topologie que 000 (5496 sommets, ~85 % identiques),
+        seuls les seins changent ; tour de taille et fesses identiques.
+      - `uppr_002` + `lowr_002` forment un autre corps (4031 / 1374 sommets, 80A, fesses
+        différentes), soudé seulement à lui-même. Couture de taille (sommets confondus à 0,5 mm près) :
+        53 sommets entre `uppr_000/1/3/4/5` et `lowr_000/001`, 25 entre `uppr_002` et `lowr_002`, aucun
+        entre les deux familles (déjà un jour visible dans le mod d'origine sur ces mélanges).
+      - Piège : `uppr_002`/`lowr_002` utilisent les textures `mp_fm_skin_f_up_pak`/`_lo_pak`, que la
+        détection de la peau par nom de matériau (`<comp>_diff_`) ne reconnaissait pas (« no breast
+        region found »). Le builder marque maintenant chaque mesh avec le composant du fichier dont il
+        vient (`ped_component`), `_body_meshes` s'en sert d'abord.
+    - **Option A (rejouer l'ajustement de 000 partout) rejetée pour la poitrine** : 90C demandé,
+      obtenu 112,1 cm (90E) sur `uppr_001`/`004`, 102,5 cm (90A) sur `003`/`005`, 98,5 cm sur `002`,
+      soit -8,5 à +5,1 cm pour une tolérance de 0,5 cm.
+    - **Choix retenu, mixte** :
+      - poitrine ajustée sur chaque `uppr` (option B). Sans risque pour la couture : le champ de
+        poitrine commence à z ≥ 0,137 (fondu de la bande), la couture est sous z = 0,089 ;
+      - fesses : le champ traverse la couture (de z -0,33 à 0,16) et le jeu combine librement
+        `uppr_i` et `lowr_j`. Un seul champ, celui de la paire principale, est donc rejoué
+        (`replay_glutes`) sur toute variante soudée à un fichier principal. Il n'est réajusté que sur
+        une paire soudée à aucun d'eux (`uppr_002` + `lowr_002`, son propre corps). Rejouer le champ
+        de 000 sur ce corps donnait 0,800 / 0,727 et déplaçait l'apex mesuré (0,50 → 0,23).
+      - chaque variante est reconstruite avec sa partenaire de couture
+        (`layered_ped_builder.skin_variant_combos` : la plus basse variante de l'autre composant qui
+        partage des sommets soudés, sinon la plus basse).
+    - **Une seule source de vérité** : `import_layered_ped --deformation-out` écrit en plus
+      `variants` (fichier, partenaire, liste de `Deformation` dans l'ordre du bake, mesures,
+      `reached`). `ped_package` réexporte chaque variante seule et la déforme avec
+      `reshape_ped_xml` (peau seulement). Les objets portés suivent toujours la peau de la paire
+      principale, comme dans Blender.
+    - **Rapport du paquet** : mesures de chaque variante (prises dans le build), `[WARN]` si une
+      cible est manquée, `[WARN]` pour toute variante de peau livrée sans déformation, et contrôle des
+      coutures (`seam_report`) sur chaque paire uppr/lowr soudée à l'origine : écart maximal entre
+      sommets soudés avant → après.
+    - Tolérance des fesses rejouées : 0,01 sur les ratios (`GLUTE_REPLAY_TOLERANCE`, le double de
+      celle de l'ajustement). L'ajustement de bande propre à chaque variante déplace un peu la taille,
+      car la bande s'estompe 12 cm sous un pli qui varie selon la variante.
+    - Vérifié sur Alexandra (90C + athletic) :
+      - les 9 fichiers `uppr`/`lowr` sont régénérés (plus `teef` et `accs`, qui suivent la peau) ;
+        les 91 autres sont identiques à l'octet ;
+      - LOD High livré = bake Blender des mêmes déformations à 0,00011 mm près, pour les 7 variantes ;
+      - poitrine : 000/001/004 → 90,4 / 107,0 cm, 003/005 → 90,1 / 106,8 cm (cibles 107,0 à
+        107,4), 002 → 90,3 / 107,1 cm ; tout est ~90C ;
+      - fesses (cible 0,78 / 0,72) : paire principale et `lowr_001` 0,783 / 0,717, `uppr_001`/`004`
+        0,787 / 0,720, `uppr_003`/`005` 0,786 / 0,711, paire 002 (ajustée) 0,777 / 0,723 ;
+      - coutures : les 11 paires soudées restent fermées, écart maximal 0,000 mm avant et après ;
+      - rendus EEVEE gris (face, profil, dos, 3/4) de `uppr_003+lowr_001`, `uppr_001+lowr_000`,
+        `uppr_002+lowr_002` et `uppr_003+lowr_000` : pas de pli ni de jour. Le mélange non soudé
+        `uppr_003+lowr_002` garde le jour dans le dos du mod d'origine, à peine changé (distance
+        médiane bord du `lowr` → `uppr` 14,2 → 14,8 mm).
+    - Coût : une reconstruction et un ajustement par variante, ~1 min de plus pour CatalinaNude,
+      seulement avec `--deformation-out`.
+    - Limites : non testé en jeu. Les mélanges entre familles non soudées restent aussi imparfaits que
+      dans l'original. La sélection du partenaire suppose que les variantes d'un même emplacement
+      sont dans le dossier du ped (pas de donneur ni de niveau inférieur, sinon pas de variantes,
+      avec un message `[INFO]`).
