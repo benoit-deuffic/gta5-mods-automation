@@ -1377,3 +1377,66 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       (99e centile).
     - Limite connue, déjà présente au commit e4cc6be : slim + low n'atteint pas l'apex visé (0,81
       au lieu de 0,60, avec avertissement) et laisse un renflement tombant.
+
+43. **Fesses minces + basses : apex atteint, sans renflement (2026-10-13)** : corrige la limite connue
+    du point 41 (slim + low : apex à 0,82 au lieu de 0,60, avertissement, renflement tombant).
+    - **Cause** : le lobe arrière (projection) entrait en fondu sur 10 cm AU-DESSUS du pli
+      (`GLUTE_FOLD_FADE`, choisi pour l'agrandissement). En réduction, ce fondu épargnait le bas de
+      la fesse pendant que le reste était aplati : son reliquat devenait le point le plus saillant.
+      Mesuré sur CatalinaNude (projection 0,56, sans décalage) : profil arrière plat à 2,6 mm près
+      entre z −0,124 et −0,044, apex détecté au plus bas (position 0,77) ; avec le décalage de
+      −2,8 cm, une bosse de 11 mm au-dessus du pli (apex 0,82). La position de l'apex ne descendait
+      plus avec le décalage (0,74 à 0,81 sur toute la plage) : la cible 0,60 était hors d'atteinte.
+      Même défaut, moins visible, sur slim + mid (largeur 0,787 au lieu de 0,78) et athletic + low
+      (apex 0,64) ; « slim » seul montrait déjà un petit renflement bas au rendu.
+    - **Correction de la déformation** : en réduction, le lobe arrière entre en fondu SOUS le pli
+      (`GLUTE_REDUCE_FOLD_FADE` = 6 cm, plein effet dès le pli). Toute la fesse au-dessus est
+      réduite uniformément, donc l'apex garde sa hauteur et le décalage vertical pilote seul la
+      hauteur. L'agrandissement garde le fondu de 10 cm au-dessus du pli. Essais : un fondu de 2 cm
+      au-dessus du pli donnait les mêmes chiffres mais laissait une lèvre sur le haut de la cuisse ;
+      4 et 6 cm sous le pli : plus de lèvre, 6 cm le plus doux. Avec l'ancien fondu de 10 cm et
+      le reste de la correction, slim + low reste à 0,77 : le fondu est bien la cause.
+    - **Correction de la mesure dans la boucle** : la largeur est bissectée sur le rapport de dos
+      tel que le résultat final le mesure ; avant, la fenêtre pli → sillon était figée avant
+      l'ajustement (slim + mid : 0,787 annoncé comme atteint). Toutes les mesures d'un corps
+      remodelé prennent pli, taille et haut du sillon sur le corps décalé mais pas encore remodelé
+      (`landmarks(d)`) : le pli est calculé, la taille ne bouge pas (tous les fondus y sont nuls), le
+      haut du sillon est osseux (re-détecté après aplatissement, il bougeait et disparaissait à
+      projection 0). La taille ne dérive plus (71,4 → 70,6 cm sur slim + low). La projection reste
+      bissectée sur la profondeur à la hauteur d'apex du tour courant : bissectée sur le rapport
+      re-détecté, slim + high trouvait une 2e solution (projection 0,375, apex sauté à 0,21).
+    - **`reached` jugé sur la mesure finale** (`glute_targets_reached`) et non sur le dernier
+      drapeau de la boucle, qu'une étape suivante de la descente peut défaire.
+    - Vérifié réel sur CatalinaNude (builds Blender = harnais hors Blender, chiffres identiques) :
+
+      | forme / hauteur | profil (cible) | dos (cible) | apex (cible) | décalage |
+      |---|---|---|---|---|
+      | – / high | 0,720 | 0,630 | 0,41 (0,40) | +1,5 cm |
+      | – / mid | 0,735 | 0,630 | 0,49 (0,50) | −1,5 cm |
+      | – / low | 0,716 | 0,629 | 0,60 (0,60) | −5,6 cm |
+      | slim / – | 0,849 (0,85) | 0,779 (0,78) | 0,45 | 0 |
+      | slim / high | 0,847 (0,85) | 0,780 (0,78) | 0,41 (0,40) | +1,5 cm |
+      | slim / mid | 0,849 (0,85) | 0,778 (0,78) | 0,49 (0,50) | −1,5 cm |
+      | slim / low | 0,850 (0,85) | 0,782 (0,78) | 0,60 (0,60) | −5,6 cm |
+      | athletic / – | 0,779 (0,78) | 0,722 (0,72) | 0,45 | 0 |
+      | athletic / high | 0,777 (0,78) | 0,723 (0,72) | 0,41 (0,40) | +1,5 cm |
+      | athletic / mid | 0,784 (0,78) | 0,722 (0,72) | 0,49 (0,50) | −1,5 cm |
+      | athletic / low | 0,780 (0,78) | 0,722 (0,72) | 0,60 (0,60) | −5,6 cm |
+      | round / – | 0,701 (0,70) | 0,669 (0,67) | 0,45 | 0 |
+      | round / high | 0,699 (0,70) | 0,669 (0,67) | 0,41 (0,40) | +1,5 cm |
+      | round / mid | 0,703 (0,70) | 0,669 (0,67) | 0,49 (0,50) | −1,5 cm |
+      | round / low | 0,699 (0,70) | 0,668 (0,67) | 0,59 (0,60) | −6,0 cm |
+      | large / – | 0,617 (0,62) | 0,602 (0,60) | 0,45 | 0 |
+      | large / high | 0,616 (0,62) | 0,602 (0,60) | 0,41 (0,40) | +1,5 cm |
+      | large / mid | 0,624 (0,62) | 0,601 (0,60) | 0,51 (0,50) | −3,0 cm |
+      | large / low | 0,621 (0,62) | 0,600 (0,60) | 0,59 (0,60) | −6,0 cm |
+
+      19/19 dans les tolérances (0,005 sur les rapports, 0,02 sur l'apex), taille à 70,6 cm
+      partout. Avant : slim + mid, slim + low et athletic + low échouaient. 80A + slim + low en un
+      seul build : 80A (94,4 cm) et fesses identiques au build seul.
+      Rendus de dos, trois-quarts dos et hanche (soleil de dos) : slim + low n'a plus de bosse
+      tombante ni de lèvre au pli ; slim + high, athletic + mid, round + low, large + low inchangés
+      d'aspect.
+    - Limites : round + low et large + low atteignent la butée de décalage (−6 cm) à 0,59 ; les
+      variantes low gardent un pli inférieur marqué (point 37) ; validé uniquement sur
+      CatalinaNude.
