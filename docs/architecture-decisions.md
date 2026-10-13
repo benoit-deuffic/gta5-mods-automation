@@ -1260,3 +1260,65 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       l'aspect « tombant » voulu, mais ce sont les moins naturelles.
     - Limites : ne marche que sur le corps nu (uppr/lowr) ; validé uniquement sur CatalinaNude ; un
       build fesses prend 5 à 12 s.
+
+38. **Export du ped retouché, sans Sollumz (2026-10-13)** : les étapes 2 et 3 d'`integ-analysis.md`.
+    - `body_morphology.Deformation` : un ajustement (`fit_bust`, `fit_glutes`) sous forme de données
+      (lobes, paroi, décalage). La même fonction `apply()` est appliquée aux meshes Blender et à
+      l'export, il n'y a donc qu'une seule source de vérité.
+      `import_layered_ped.py --deformation-out x.json` écrit les déformations appliquées et les
+      fichiers composants mesurés. `--morphs` est refusé, car non rejouable.
+    - `scripts/ped_package.py --deformation x.json --source import --name <Nouveau> --out dist` :
+      - copie octet pour octet `<ped>.yft`, `<ped>.ymt` et `<ped>/`, renommés (le `.ymt` ne
+        contient pas le nom du ped) ;
+      - régénère seulement les `.ydd` que la déformation fait bouger. Chaque binaire d'origine est
+        exporté seul en XML, la déformation est rejouée sur tous les LOD (Blender n'importe que
+        High), puis le fichier est reconverti par `codewalker-cli` ;
+      - normales et tangentes suivent la jacobienne (différences finies, ~1e-4) ;
+      - bornes : seulement agrandies.
+    - Pas de passage par l'export Sollumz : noms internes (`uppr_015_r`), shaders, textures
+      intégrées et skinning restent ceux d'origine.
+    - Piège : dans le dossier plat `import_xml/<ped>/`, des `.ydd` voisins intègrent des textures
+      DIFFÉRENTES sous le même nom (`lowr_normal_015` en 512 DXT1 dans `lowr_000`, en 1024 DXT5
+      ailleurs), et le dossier n'en garde qu'une. Reconstruire depuis ce dossier échangeait
+      silencieusement les textures, d'où l'export isolé de chaque fichier. L'aperçu Blender est
+      probablement touché aussi (ré-association par nom de fichier), non corrigé.
+    - Piège : les bornes au niveau du drawable ne sont pas dans le repère des géométries (lowr :
+      drawable z de 0,03 à 1,10, géométrie de -0,94 à 0,08). On les agrandit de la croissance des
+      géométries, sans faire l'union des deux.
+    - Vérifié sur CatalinaNude 80A + round :
+      - uppr, lowr et teef refaits (963, 828 et 50 sommets, tous LOD), les 101 autres fichiers sont
+        identiques à l'octet ;
+      - LOD High du `.ydd` livré = mesh Blender à 0,0001 mm près ;
+      - ré-import du ped livré : fesses 0,701 / 0,669, comme l'ajustement ;
+      - XML réexporté : seules les lignes de sommets et les bornes diffèrent, `.dds` identiques.
+    - `measure_chest` sur un corps déjà retouché redétecte l'apex et le pli et donne 75F (au lieu
+      de 80A, mesuré aux hauteurs de base). Limite de la mesure, présente aussi dans le `.blend`
+      source.
+    - Non fait : les variantes de corps 001 à 005, le `.oiv`, l'entrée `ap_m.xml` et le test en jeu.
+
+39. **Poitrine réduite trop aplatie : correction (2026-10-13)** : un 80A obtenu depuis un 80G avait
+    la forme d'une « crêpe ».
+    - Profil passant par le mamelon : plateau vertical à 14,9 cm de z 0,30 à 0,38.
+    - Cause : la paroi (cage thoracique) était un cylindre vertical calé sur la section
+      sous-poitrine (13,5 cm). Or le thorax recule en montant (12,6 cm à z 0,41, 7,9 cm à z 0,45).
+      Toute cette pente comptait comme du sein et rien ne pouvait passer derrière le cylindre. De
+      plus, seule la projection diminuait : la hauteur du sein (12 cm, celle d'un 80G) restait.
+    - Corrections :
+      - `upper_wall` : paroi inclinée, interpolée entre la section sous-poitrine et la section où
+        le lobe s'arrête (haut de poitrine non touché) ;
+      - `mound_contract` : le sein se contracte aussi en hauteur vers l'apex, en proportion de sa
+        saillie relative. Le bout rétrécit comme une copie réduite et la base reste en place ;
+      - `BUST_FOLD_FADE` 0,02 → 0 : le fondu affaiblissait le dessous du sein tombant de 80G et
+        laissait une tablette horizontale ;
+      - `Lobe.weight` renvoyait 1 sous le pli quand le fondu était nul ; corrigé à 0.
+    - Résultats sur CatalinaNude :
+      - échelle 0,25 → 0,5 pour le 80A ;
+      - profil qui décroît régulièrement après le mamelon (15,0 / 14,0 / 12,5 / 10,9 cm à z 0,33 /
+        0,36 / 0,39 / 0,41) ;
+      - 80A, 80C et 80E atteints (94,4 / 98,3 / 102,5 cm), sans rebord ni pli sur les rendus de
+        profil et de trois-quarts ;
+      - fesses inchangées.
+    - L'export rejoue la nouvelle déformation telle quelle (`Deformation.contract`, `upper_wall`).
+    - Le collier (`accs_000`) bouge maintenant un peu avec le haut de poitrine : il est devant la
+      paroi inclinée. L'écart avec la peau est réduit, sans pénétration visible.
+    - Reste : l'emprise LATÉRALE du sein n'est pas réduite, un 80A garde une base assez large.

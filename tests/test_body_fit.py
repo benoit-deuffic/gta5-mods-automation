@@ -10,7 +10,7 @@ import pytest
 
 from scripts.body_morphology import (
     GLUTE_HEIGHTS, GLUTE_SHAPES, Lobe, bra_band_mismatch, bra_size_label, bust_target_cm,
-    cleft_top_height, excess_scale, fit_monotonic, fold_height, glute_height_label, glute_shape_label,
+    cleft_top_height, excess_scale, fit_monotonic, mound_contract, fold_height, glute_height_label, glute_shape_label,
     hull_perimeter, parse_bra_size, section_xy, slice_circumference, slice_depth, slice_extent,
     shift_bump, vertical_shift, wall_profile,
 )
@@ -190,3 +190,38 @@ def test_cleft_top_is_where_the_midline_stops_lying_behind_the_cheeks():
             edges += [(base - len(ring) + i, base + i) for i in range(len(ring))]
     top = cleft_top_height(points, edges, 0.0, 0.08, 0.0, (0.0, 1.0, 0.0), (1.0, 0.0, 0.0), step=0.01)
     assert 0.03 <= top <= 0.05
+
+
+def test_zero_fold_fade_leaves_everything_below_the_fold_alone():
+    lobe = _lobe(fold_fade=0.0)
+    assert lobe.weight(0.25, FRONT) == 0.0
+    assert lobe.weight(0.27, FRONT) == 1.0
+
+
+def test_sloped_wall_counts_only_what_stands_out_of_a_receding_chest():
+    # 18 cm forward at the apex (z 0.33, full lobe weight), 35% of the way
+    # from the fold (0.26) to 0.46
+    point = [(0.0, -0.18, 0.33)]
+    kwargs = _wall_kwargs()  # 12 cm wall at the fold
+    lobes = [(_lobe(), 0.5)]
+
+    def sloped_to(radius):
+        return (0.26, 0.46, tuple(wall_profile(_ring_xy(radius), kwargs["center"])))
+
+    vertical = excess_scale(point, [1.0], lobes=lobes, **kwargs)[0]
+    sloped = excess_scale(point, [1.0], lobes=lobes, upper_wall=sloped_to(0.20), **kwargs)[0]
+    assert vertical[1] == pytest.approx(-0.15)  # 6 cm of excess halved
+    assert sloped[1] == pytest.approx(-0.18 + 0.5 * (0.18 - 0.148))  # wall 14.8 cm there
+    # a wall reaching 18 cm at that height: nothing stands out, nothing moves
+    on_wall = excess_scale(point, [1.0], lobes=lobes, upper_wall=sloped_to(0.12 + 0.06 / 0.35), **kwargs)[0]
+    assert on_wall == pytest.approx(point[0])
+
+
+def test_mound_contract_shrinks_the_tip_toward_the_apex_and_keeps_the_base():
+    kwargs = _wall_kwargs()
+    tip_below = (0.0, -0.18, 0.30)    # full apex excess (6 cm), 3 cm under the apex
+    base_below = (0.0, -0.12, 0.30)   # on the wall: no excess
+    out = mound_contract([tip_below, base_below], [1.0, 1.0], kwargs["center"], kwargs["wall"], None,
+                         _lobe(0.0), 0.33, 0.06, 0.5)
+    assert out[0][2] == pytest.approx(0.315)  # half-way to the apex
+    assert out[1] == base_below

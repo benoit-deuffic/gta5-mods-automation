@@ -31,6 +31,8 @@ to produce --xml-root from the user's raw peds/<ped_name>/ extraction.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -101,6 +103,9 @@ def parse_args():
                          help="Optional height of the buttocks' most prominent point between the "
                               "top of the intergluteal cleft and the gluteal fold "
                               "(body_morphology.GLUTE_HEIGHTS)")
+    parser.add_argument("--deformation-out", default=None,
+                        help="Write the applied --bust-size/--glutes reshapes as JSON (with the "
+                             "component files they were fitted on) for scripts/ped_package.py")
     parser.add_argument("--skeleton-yft", default=None,
                          help="CodeWalker-XML .yft whose skeleton is used for a ped that ships "
                               "without its own <ped-name>.yft.xml (e.g. an MP Freemode component "
@@ -434,6 +439,10 @@ def main():
     sliders = body_morphology.parse_slider_spec(args.morphs) if args.morphs else {}
     if args.bust_size:
         body_morphology.parse_bra_size(args.bust_size)  # fail before the (long) build on a typo
+    if sliders and args.deformation_out:
+        # bone-slider morphs are baked through the Armature modifier, not a
+        # replayable Deformation: the export would silently miss them
+        sys.exit("[FAIL] --morphs can't be exported (--deformation-out): use --bust-size/--glutes")
     donor_components = tuple(c.strip() for c in args.body_donor_components.split(",") if c.strip())
     extra_roots = tuple(r.strip() for r in args.extra_texture_roots.split(",") if r.strip()) \
         if args.extra_texture_roots else ()
@@ -490,11 +499,13 @@ def main():
                   f"changed nothing: {morph['no_effect_bones']}")
 
     armature = bpy.data.objects[stats["armature"]]
+    deformations = []  # in the order they were baked
     if args.bust_size:
         fit = body_morphology.fit_bust(armature, args.bust_size)
         if "error" in fit:
             print(f"[FAIL] bust fit {args.bust_size}: {fit['error']}")
             sys.exit(1)
+        deformations.append(fit["deformation"])
         base, result = fit["base"], fit["result"]
         print(f"[BUST] base: underbust {base['underbust_cm']} cm, bust {base['bust_cm']} cm (~{base['size']})")
         print(f"[BUST] requested {args.bust_size}: target bust {fit['target_bust_cm']} cm, region scale "
@@ -516,6 +527,7 @@ def main():
         if "error" in fit:
             print(f"[FAIL] glute fit: {fit['error']}")
             sys.exit(1)
+        deformations.append(fit["deformation"])
         print(f"[GLUTES] base: {_hips_line(fit['base'])}")
         print(f"[GLUTES] requested shape={args.glutes} height={args.glute_height} {fit['targets']}: "
               f"scales {fit['scales']}, apex shift {fit['shift_cm']} cm -> "
@@ -532,6 +544,15 @@ def main():
     Path(args.output_blend).parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=args.output_blend)
     print(f"[OK] Saved {args.output_blend}")
+    if args.deformation_out:
+        out = Path(args.deformation_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({
+            "ped_root": os.path.abspath(args.ped_root), "ped_name": args.ped_name,
+            "skeleton_yft": stats["skeleton_yft"] and os.path.abspath(stats["skeleton_yft"]),
+            "components": {c: os.path.abspath(p) for c, p in stats["resolved_components"].items()},
+            "deformations": [d.to_dict() for d in deformations]}, indent=1))
+        print(f"[OK] Saved {out}")
 
     if args.preview_png:
         Path(args.preview_png).parent.mkdir(parents=True, exist_ok=True)

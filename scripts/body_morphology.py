@@ -50,7 +50,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -397,13 +397,15 @@ def fit_monotonic(f, target, lo, hi, tol, max_iter=20):
 # width) for the glutes. Each vertex is also weighted by its skin weight on
 # the region's bones (arms/hands: 0, so they never move).
 WALL_BINS = 72                  # 5 degree angle bins for the wall profile
-# Bust: 2 cm fade-in above the fold (a long one left a ledge under an 80A,
-# the lower half holds the volume) and a long fade above the apex: with
+# Bust: no fade-in above the fold. The excess over the sloped ribcage wall
+# (fit_bust) is already ~0 on the fold itself; a 2 cm fade weakened the
+# hanging underside of an 80G (z fold..+3 cm) and left a horizontal shelf
+# under an 80A. A long fade above the apex: with
 # 0.07 an 80A left the upper chest (z +3..+5 cm) 1.2 cm prouder than the
 # flattened bust. Harmless higher up: from the upper chest on the front
 # recedes inside the underbust wall, so its excess is 0 (CatalinaNude:
 # circumferences at z 0.43/0.46 unchanged).
-BUST_FOLD_FADE = 0.02
+BUST_FOLD_FADE = 0.0
 ABOVE_APEX_FADE = 0.13
 BUST_SECTOR = (80.0, 120.0)     # degrees from forward: full effect / none (back untouched)
 
@@ -425,7 +427,7 @@ class Lobe:
     def weight(self, z, theta) -> float:
         if z < self.full_z:
             span = self.full_z - self.bottom_z
-            u = (z - self.bottom_z) / span if span > 0 else 1.0
+            u = (z - self.bottom_z) / span if span > 0 else 0.0  # below bottom_z: nothing
             height = 0.0 if u <= 0 else u * u * (3 - 2 * u)
         elif z <= self.apex_z:
             height = 1.0
@@ -471,12 +473,24 @@ def _wall_radius(wall, theta):
     return wall[i % bins] * (1 - frac) + wall[(i + 1) % bins] * frac
 
 
+def _wall_radius_at(wall, upper_wall, theta, z):
+    """Wall radius at (theta, z): `wall` alone is a vertical cylinder;
+    `upper_wall` = (z0, z1, radii) slopes it linearly from `wall` at z0 to
+    `radii` at z1 (constant beyond both ends)."""
+    r = _wall_radius(wall, theta)
+    if upper_wall is None:
+        return r
+    z0, z1, upper = upper_wall
+    t = min(1.0, max(0.0, (z - z0) / (z1 - z0)))
+    return r + (_wall_radius(upper, theta) - r) * t if t else r
+
+
 def _smooth_fade(t):
     """1 at t <= 0, 0 at t >= 1, smooth (1-t^2)^2 in between."""
     return 1.0 if t <= 0 else 0.0 if t >= 1 else (1 - t * t) ** 2
 
 
-def excess_scale(points, weights, center, wall, lobes):
+def excess_scale(points, weights, center, wall, lobes, upper_wall=None):
     """Pure logic (no bpy): scale each point's radial excess over `wall`
     (wall_profile around `center`): `lobes` is a list of (Lobe, scale),
     scale 0 = flat onto the wall, 1 = unchanged. Where lobes overlap their
@@ -484,7 +498,7 @@ def excess_scale(points, weights, center, wall, lobes):
     added: added, a slim fit (projection 0.63, width 0.47) cut 74% of the
     excess where the posterior and lateral lobes met, carving vertical
     creases into the hips. `weights[i]` in [0, 1] is point i's skin weight
-    on the region's bones."""
+    on the region's bones. `upper_wall`: see _wall_radius_at."""
     out = []
     for p, w in zip(points, weights):
         if w <= 0:
@@ -494,7 +508,7 @@ def excess_scale(points, weights, center, wall, lobes):
         lobe_w = [(lobe.weight(p[2], theta), scale) for lobe, scale in lobes]
         total = sum(lw for lw, _s in lobe_w)
         change = sum((scale - 1) * lw for lw, scale in lobe_w) / max(1.0, total)
-        excess = r - _wall_radius(wall, theta)
+        excess = r - _wall_radius_at(wall, upper_wall, theta, p[2])
         if change == 0 or excess <= 0:
             out.append(tuple(p))
             continue
@@ -526,6 +540,74 @@ def vertical_shift(points, weights, center, lobe, bottom_z, top_z, delta):
         theta, _r = _polar(p, center)
         out.append((p[0], p[1], p[2] + delta * bump * lobe.weight(lobe.apex_z, theta) * min(w, 1.0)))
     return out
+
+
+def mound_contract(points, weights, center, wall, upper_wall, lobe, apex_z, apex_excess, scale):
+    """Pure logic (no bpy): scale the mound's HEIGHT on the chest around
+    `apex_z` along with its projection. Each point moves toward apex_z by
+    (1 - scale) * q, q = its excess over `wall` relative to the apex's
+    (`apex_excess`), capped at 1 -- times lobe and skin weights. The tip
+    (q ~ 1) shrinks like a scaled copy, the base (excess 0, on the ribcage)
+    stays put. Without it, excess_scale() alone kept an 80G's 12 cm tall
+    footprint at 80A: a vertical plateau (14.9 cm deep from z 0.30 to 0.38
+    on CatalinaNude), seen as a flattened pancake."""
+    out = []
+    for p, w in zip(points, weights):
+        if w <= 0:
+            out.append(tuple(p))
+            continue
+        theta, r = _polar(p, center)
+        q = min(1.0, max(0.0, (r - _wall_radius_at(wall, upper_wall, theta, p[2])) / apex_excess))
+        k = (1 - scale) * q * lobe.weight(p[2], theta) * min(w, 1.0)
+        out.append((p[0], p[1], p[2] + (apex_z - p[2]) * k) if k else tuple(p))
+    return out
+
+
+@dataclass(frozen=True)
+class Deformation:
+    """A fitted reshape as plain data (pure logic, no bpy): an optional
+    vertical_shift() or mound_contract(), then an excess_scale(), on
+    rest-pose points weighted by their skin weight on `prefixes` bones
+    (region_weight). The fits bake it into the Blender meshes; the exporter
+    (ped_package.py) replays the same one on every LOD of the shipped .ydd
+    files, which Blender never imported. `shift` = (lobe, bottom_z, top_z,
+    delta), `contract` = (lobe, apex_z, apex_excess, scale), `upper_wall`
+    = (z0, z1, radii) (see _wall_radius_at), or None."""
+    prefixes: tuple[str, ...]
+    center: tuple[float, float]
+    wall: tuple[float, ...]
+    lobes: tuple[tuple[Lobe, float], ...]
+    shift: tuple[Lobe, float, float, float] | None = None
+    contract: tuple[Lobe, float, float, float] | None = None
+    upper_wall: tuple[float, float, tuple[float, ...]] | None = None
+
+    def apply(self, points, weights):
+        if self.shift is not None:
+            lobe, bottom_z, top_z, delta = self.shift
+            points = vertical_shift(points, weights, self.center, lobe, bottom_z, top_z, delta)
+        if self.contract is not None:
+            points = mound_contract(points, weights, self.center, self.wall, self.upper_wall, *self.contract)
+        return excess_scale(points, weights, self.center, self.wall, self.lobes, self.upper_wall)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Deformation":
+        def lobe(x):
+            return Lobe(x["axis_angle"], tuple(x["sector"]), x["bottom_z"], x["full_z"], x["apex_z"], x["top_z"])
+        shift, contract, upper = d.get("shift"), d.get("contract"), d.get("upper_wall")
+        return cls(tuple(d["prefixes"]), tuple(d["center"]), tuple(d["wall"]),
+                   tuple((lobe(lb), scale) for lb, scale in d["lobes"]),
+                   (lobe(shift[0]), *shift[1:]) if shift else None,
+                   (lobe(contract[0]), *contract[1:]) if contract else None,
+                   (upper[0], upper[1], tuple(upper[2])) if upper else None)
+
+
+def region_weight(influences, prefixes) -> float:
+    """Skin weight of one vertex on the bones named `prefixes*`, capped at 1;
+    `influences` = (bone name, weight) pairs."""
+    return min(1.0, sum(w for name, w in influences if name.startswith(prefixes)))
 
 
 BUST_FIT_RANGE = (0.0, 2.0)
@@ -789,7 +871,7 @@ def _apply_regions(meshes, region_scales):
 
 
 def _region_weight(vertex, names, prefixes) -> float:
-    return min(1.0, sum(g.weight for g in vertex.groups if names[g.group].startswith(prefixes)))
+    return region_weight(((names[g.group], g.weight) for g in vertex.groups), prefixes)
 
 
 def _samples(meshes, prefixes):
@@ -812,15 +894,14 @@ def _samples(meshes, prefixes):
     return points, weights, edges
 
 
-def _write(meshes, prefixes, transform):
-    """bpy: bake `transform(world_points, weights) -> moved points` into every
-    mesh's rest-pose vertices (weights = skin weight on `prefixes` bones)."""
+def _write(meshes, deformation: Deformation):
+    """bpy: bake `deformation` into every mesh's rest-pose vertices."""
     import mathutils
     for obj in meshes:
         names = {g.index: g.name for g in obj.vertex_groups}
         world = [tuple(obj.matrix_world @ v.co) for v in obj.data.vertices]
-        weights = [_region_weight(v, names, prefixes) for v in obj.data.vertices]
-        moved = transform(world, weights)
+        weights = [_region_weight(v, names, deformation.prefixes) for v in obj.data.vertices]
+        moved = deformation.apply(world, weights)
         to_local = obj.matrix_world.inverted()
         for v, old, new in zip(obj.data.vertices, world, moved):
             if new != old:
@@ -896,15 +977,34 @@ def fit_bust(armature, bra_size: str) -> dict:
                 min(base["fold_z"] + BUST_FOLD_FADE, base["apex_z"]), base["apex_z"],
                 base["apex_z"] + ABOVE_APEX_FADE)
 
+    # The ribcage under the breast recedes going up (CatalinaNude, nipple
+    # line: 13.5 cm forward at the fold, 7.9 at z 0.45): a vertical wall at
+    # the underbust left that slope counted as breast and turned small
+    # sizes into a vertical plateau. Slope the wall up to the section where
+    # the lobe stops (untouched upper chest).
+    upper_z = lobe.top_z
+    upper_wall = (base["fold_z"], upper_z, tuple(wall_profile(section_xy(torso, edges, upper_z), center)))
+    # the apex's excess over the wall (both breasts' mean): mound_contract's
+    # reference, so the tip shrinks in height as much as in projection
+    apexes = [a for a in (bust_apex(torso, r["head"], r["forward"]) for r in regions) if a is not None]
+    apex_excess = sum(_polar(a, center)[1] - _wall_radius_at(wall, upper_wall, _polar(a, center)[0], a[2])
+                      for a in apexes) / len(apexes)
+    if apex_excess <= 0:
+        return {"error": f"the bust apex of {body.name} doesn't stand out of its ribcage wall"}
+
+    def deformation(s):
+        return Deformation(TORSO_BONE_PREFIXES, center, tuple(wall), ((lobe, s),),
+                           contract=(lobe, base["apex_z"], apex_excess, s), upper_wall=upper_wall)
+
     # Measured at the BASE apex/fold heights throughout (a tape kept at the
     # original nipple height): the most-forward point drops as the breast
     # flattens (z 0.334 -> 0.291 on CatalinaNude), which made a re-detected
     # apex height non-monotonic in the scale and broke the bisection.
+
     scale, _predicted, reached = fit_monotonic(
-        lambda s: 100 * slice_circumference(excess_scale(torso, weights, center, wall, [(lobe, s)]),
-                                            edges, base["apex_z"]),
+        lambda s: 100 * slice_circumference(deformation(s).apply(torso, weights), edges, base["apex_z"]),
         target, *BUST_FIT_RANGE, BUST_FIT_TOLERANCE_CM)
-    _write(meshes, TORSO_BONE_PREFIXES, lambda pts, w: excess_scale(pts, w, center, wall, [(lobe, scale)]))
+    _write(meshes, deformation(scale))
 
     final = _samples([body], TORSO_BONE_PREFIXES)[0]  # re-read from the written mesh
     underbust = 100 * slice_circumference(final, edges, base["fold_z"])
@@ -913,7 +1013,8 @@ def fit_bust(armature, bra_size: str) -> dict:
               "size": bra_size_label(underbust, bust)}
     return {"base": {k: base[k] for k in ("underbust_cm", "bust_cm", "size")},
             "target_bust_cm": round(target, 1), "scale": round(scale, 3), "reached": reached,
-            "result": result, "band_mismatch": bra_band_mismatch(bra_size, base["underbust_cm"])}
+            "result": result, "band_mismatch": bra_band_mismatch(bra_size, base["underbust_cm"]),
+            "deformation": deformation(scale)}
 
 
 # --- Glutes (bpy) -----------------------------------------------------------
@@ -1099,8 +1200,12 @@ def fit_glutes(armature, shape: str | None = None, height: str | None = None) ->
         rear_lobe, sides = _glute_lobes(lobes_at["heights"], forward)
         return [(rear_lobe, sc["projection"])] + [(side, sc["width"]) for side in sides]
 
+    def deformation(d, sc):
+        return Deformation(GLUTE_BONE_PREFIXES, center, tuple(wall), tuple(lobes(sc)),
+                           (rear, shift_bottom, base["waist_z"], d) if d else None)
+
     def transformed(d, sc):
-        return excess_scale(shifted(points, weights, d), weights, center, wall, lobes(sc))
+        return deformation(d, sc).apply(points, weights)
 
     def fit_height():
         # Fully re-measured at each step: the shift also moves the cleft top
@@ -1153,11 +1258,10 @@ def fit_glutes(armature, shape: str | None = None, height: str | None = None) ->
     if height is not None:
         reached &= ok_height
 
-    final_lobes = lobes(scales)
-    _write(_meshes(armature), GLUTE_BONE_PREFIXES,
-           lambda pts, w: excess_scale(shifted(pts, w, delta), w, center, wall, final_lobes))
+    applied = deformation(delta, scales)
+    _write(_meshes(armature), applied)
     final = _samples(meshes, GLUTE_BONE_PREFIXES)[0]
     result = _measure_hips(final, edges, pelvis_z, forward, fold_after(delta))
     return {"base": _public(base), "targets": targets,
             "scales": {k: round(v, 3) for k, v in scales.items()}, "shift_cm": round(100 * delta, 1),
-            "reached": reached, "result": _public(result) if result else None}
+            "reached": reached, "result": _public(result) if result else None, "deformation": applied}
