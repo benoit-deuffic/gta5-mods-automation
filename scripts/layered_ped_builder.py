@@ -128,7 +128,7 @@ def _best_match_per_component(files: list[Path]) -> dict[str, ComponentMatch]:
     return best
 
 
-def resolve_component_diffuse(drawable_path: Path, ethnicity: str = "whi") -> Path | None:
+def resolve_component_diffuse(drawable_path: Path, ethnicity: str = "whi", letter: str | None = None) -> Path | None:
     """Return the .dds the GAME uses as diffuse for a component drawable,
     or None if it can't be determined from the exported XML tree.
 
@@ -143,7 +143,8 @@ def resolve_component_diffuse(drawable_path: Path, ethnicity: str = "whi") -> Pa
     while ``teef_diff_000_a_uni.ytd`` holds the real texture.
 
     Variation choice: race == ``ethnicity`` first, then ``uni``, then the
-    first in sorted order (lowest letter = default variation). The .dds is
+    first in sorted order (lowest letter = default variation); `letter`
+    forces that texture variation (e.g. a picked hair colour). The .dds is
     the first ``<FileName>`` of that ``.ytd.xml``, looked up next to it
     (CodeWalker's export dumps embedded textures alongside).
     """
@@ -157,7 +158,7 @@ def resolve_component_diffuse(drawable_path: Path, ethnicity: str = "whi") -> Pa
         return None
     component, variant = match.group(1).lower(), match.group(2)
     folder = drawable_path.parent
-    candidates = sorted(folder.glob(f"{component}_diff_{variant}_*.ytd.xml"))
+    candidates = sorted(folder.glob(f"{component}_diff_{variant}_{letter or '*'}_*.ytd.xml"))
     if not candidates:
         return None
 

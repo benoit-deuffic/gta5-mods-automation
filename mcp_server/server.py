@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
@@ -24,7 +25,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_server import ai_reskin_runner, blender_runner, prompt_refiner, validator
 from mcp_server.text3d_backend import get_backend
-from scripts import (codewalker_convert, industrialize_pipeline, oiv_package, package_builder, ped_package,
+from scripts import (codewalker_convert, component_swap, industrialize_pipeline, oiv_package, package_builder, ped_package,
                      xml_manifest_updater, ymt_builder)
 
 mcp = FastMCP("gtav-ped-mcp")
@@ -222,66 +223,131 @@ def build_layered_ped(ped_name: str, body_description: str = "") -> dict:
 
 
 @mcp.tool()
-def package_layered_ped(ped_name: str, new_name: str, body_description: str = "") -> dict:
+def package_layered_ped(ped_name: str, new_name: str, body_description: str = "", head: str = "",
+                        hair: str = "") -> dict:
     """Build, reshape and ship a ped as a new ped `new_name`, ready to install:
     build_layered_ped's chain (with every body variant fitted) ->
     scripts/ped_package.py (original binaries renamed, only the reshaped .ydd
     regenerated, on every LOD) -> scripts/oiv_package.py (OpenIV package
-    adding the files into dlcpacks/pedselector/dlc.rpf/peds.rpf).
+    adding the files into dlcpacks/pedselector/dlc.rpf/peds.rpf), then the
+    ped is registered in UserMods/ap_m.xml.
 
     Output in DELIVERY_OUTPUT_DIR: `<new_name>.yft`, `<new_name>.ymt`,
     `<new_name>/` and `<new_name>.oiv`, and workspace/<new_name>/ (.blend,
-    preview, deformation record); never overwrites an existing ped (checked
-    before Blender runs; use update_packaged_ped for that). Still to do by
-    hand: install the .oiv with OpenIV's Package Installer (mods folder) and
-    register `new_name` in UserMods/ap_m.xml (PedSelector, Streamed = true).
-    `report` lists every reshaped file, variant measurements and seam checks
-    ([WARN] = a variant misses its targets or a seam opened).
+    preview, deformation + look record); never overwrites an existing ped
+    (checked before Blender runs; use update_packaged_ped for that). Still to
+    do by hand: install the .oiv with OpenIV's Package Installer (mods folder).
+    `report` lists every reshaped file, the look, variant measurements and
+    seam checks ([WARN] = a variant misses its targets or a seam opened).
+
+    Look (drawables under import/, same skeleton as the ped):
+    - `head`: another ped's face, e.g. "Beachgirl5/head_002_r.ydd" (same
+      neck, a texture for every skin race -- scripts/head_swap.py); default:
+      the ped's own;
+    - `hair`: a hair style "<ped>/hair_NNN_u.ydd", shipped with ALL its
+      colours: the game draws one at each spawn (":<letters>" keeps only
+      those, e.g. ":ae"); default: a random style from config `hair_pool`
+      (styles that include a blond colour). Previews show the first colour;
+    - feet: always the ped's barefoot drawable when it has one.
     """
     try:
         ped_package.check_output(new_name, DELIVERY_OUTPUT_DIR)
+        look = _look(ped_name, {}, head=head, hair=hair or _random_hair())
         targets = _infer_targets(body_description)
-    except (ped_package.PackageError, prompt_refiner.PromptRefinerError) as exc:
+    except (ped_package.PackageError, prompt_refiner.PromptRefinerError, ValueError) as exc:
         return {"ped_name": ped_name, "new_name": new_name, "status": "error", "error": str(exc)}
-    return _ship(ped_name, new_name, targets)
+    return _ship(ped_name, new_name, targets, look)
 
 
 @mcp.tool()
-def update_packaged_ped(name: str, body_description: str) -> dict:
-    """Change the body of a ped already shipped by package_layered_ped, e.g.
-    ("Eva", "bonnet 95C"): only the targets the description names change,
-    the others are kept from the ped's recorded request
-    (workspace/<name>/<name>_deformation.json). The ped is rebuilt from its
-    ORIGINAL source ped (never by reshaping the shipped one again, which would
-    compound deformations), staged, and only replaces dist/<name>* and
-    workspace/<name>/ once the whole build + package succeeded -- a failed
-    update leaves the previous ped untouched. Reinstall the new .oiv over the
-    old one (same package id, OpenIV `add` replaces the files); ap_m.xml is
-    unchanged.
+def update_packaged_ped(name: str, body_description: str = "", head: str = "", hair: str = "") -> dict:
+    """Change a ped already shipped by package_layered_ped, e.g.
+    ("Eva", "bonnet 95C") or ("Eva", hair="Beachgirl5/hair_003_u.ydd:a"):
+    only what is named changes, the rest is kept from the ped's record
+    (workspace/<name>/<name>_deformation.json: body targets + look; a ped
+    recorded without a hair gets a random one, see package_layered_ped). The
+    ped is rebuilt from its ORIGINAL source ped (never by reshaping the
+    shipped one again, which would compound deformations), staged, and only
+    replaces dist/<name>* and workspace/<name>/ once the whole build +
+    package succeeded -- a failed update leaves the previous ped untouched.
+    Reinstall the new .oiv over the old one (same package id, OpenIV `add`
+    replaces the files); ap_m.xml is unchanged.
     """
     record_path = WORKSPACE_DIR / name / f"{name}_deformation.json"
     try:
         record = json.loads(record_path.read_text())
         previous = record["targets"]
-        requested = _infer_targets(body_description)
     except (OSError, ValueError, KeyError) as exc:
         return {"new_name": name, "status": "error",
                 "error": f"no recorded build for {name} ({record_path}): {exc!r}"}
+    try:
+        recorded = _recorded_look(record)
+        look = _look(record["ped_name"], recorded, head=head,
+                     hair=hair or recorded.get("hair") or _random_hair())
+        requested = _infer_targets(body_description)
+    except ValueError as exc:
+        return {"new_name": name, "status": "error", "error": str(exc)}
     except prompt_refiner.PromptRefinerError as exc:
         return {"new_name": name, "status": "error", "error": f"body target extraction: {exc}"}
+    if requested is None and look == recorded:
+        return {"new_name": name, "status": "error", "error": "nothing to change: same body and look"}
     targets = prompt_refiner.BodyTargets(
-        bra_size=requested.bra_size or previous["bra_size"],
-        glutes=requested.glutes or previous["glutes"],
-        glute_height=requested.glute_height or previous["glute_height"],
-        model=requested.model)
-    return {**_ship(record["ped_name"], name, targets), "previous_targets": previous}
+        bra_size=(requested and requested.bra_size) or previous["bra_size"],
+        glutes=(requested and requested.glutes) or previous["glutes"],
+        glute_height=(requested and requested.glute_height) or previous["glute_height"],
+        model=requested and requested.model)
+    return {**_ship(record["ped_name"], name, targets, look), "previous_targets": previous,
+            "previous_look": recorded}
+
+
+def _drawable(component: str, spec: str) -> str:
+    """Validate "<ped>/<comp>_NNN_<u|r>.ydd[:letters]" under import/ (before Blender runs)."""
+    rel, _, letters = spec.partition(":")
+    path = (industrialize_pipeline.IMPORT_DIR / rel).resolve()
+    if (industrialize_pipeline.IMPORT_DIR.resolve() not in path.parents or not path.is_file()
+            or not path.name.startswith(f"{component}_")):
+        raise ValueError(f"{component} {spec!r}: no such {component} drawable under {industrialize_pipeline.IMPORT_DIR}")
+    if letters and not letters.isalpha():
+        raise ValueError(f"{component} {spec!r}: texture letters expected after ':'")
+    return spec
+
+
+def _look(ped_name: str, base: dict, head: str = "", hair: str = "") -> dict:
+    """{component: drawable spec} shipped for the ped: `base` (a recorded
+    look) updated with the given head/hair, and the barefoot feet."""
+    look = dict(base)
+    if head:
+        look["head"] = _drawable("head", head)
+    if hair:
+        look["hair"] = _drawable("hair", hair)
+    feet = component_swap.barefoot_feet(industrialize_pipeline.IMPORT_DIR / ped_name,
+                                        industrialize_pipeline.IMPORT_XML_DIR / ped_name)
+    if feet:
+        look["feet"] = f"{ped_name}/{feet}"
+    return look
+
+
+def _random_hair() -> str:
+    pool = _CONFIG.get("hair_pool", [])
+    return random.choice(pool) if pool else ""
+
+
+def _recorded_look(record: dict) -> dict:
+    """The look of a recorded build (records made before `look` existed:
+    a head recorded as its import_xml/ .ydd.xml path)."""
+    if "look" in record:
+        return dict(record["look"])
+    xml = record.get("targets", {}).get("head")
+    if not xml:
+        return {}
+    return {"head": str(Path(xml).relative_to(industrialize_pipeline.IMPORT_XML_DIR))[:-len(".xml")]}
 
 
 def _infer_targets(body_description: str) -> prompt_refiner.BodyTargets | None:
     return prompt_refiner.infer_body_targets(body_description) if body_description else None
 
 
-def _ship(ped_name: str, name: str, targets) -> dict:
+def _ship(ped_name: str, name: str, targets, look: dict) -> dict:
     """Build + package + .oiv into staging dirs, then publish them over
     workspace/<name>/ and dist/<name>*. Nothing published is touched unless
     every step succeeded."""
@@ -291,12 +357,14 @@ def _ship(ped_name: str, name: str, targets) -> dict:
     staged = Path(tempfile.mkdtemp(dir=DELIVERY_OUTPUT_DIR, prefix=f".{name}."))
     try:
         deformation = work / f"{name}_deformation.json"
-        build = _build_layered(ped_name, targets, work, name, deformation_out=deformation)
-        result = {**build, "new_name": name}
+        build = _build_layered(ped_name, targets, work, name, deformation_out=deformation, look=look)
+        result = {**build, "new_name": name, "look": look}
         if build["status"] != "built":
             return result
+        record = json.loads(deformation.read_text())
+        deformation.write_text(json.dumps({**record, "look": look}, indent=1))  # what update_packaged_ped keeps
         try:
-            report = ped_package.package_ped(deformation, industrialize_pipeline.IMPORT_DIR, name, staged)
+            report = ped_package.package_ped(deformation, industrialize_pipeline.IMPORT_DIR, name, staged, look)
             oiv_package.build_oiv(staged, name, staged)
         except (ped_package.PackageError, oiv_package.OivError) as exc:
             return {**result, "status": "error", "error": f"packaging: {exc}"}
@@ -331,6 +399,15 @@ def _register(name: str) -> str:
         return f"error: {exc}"
 
 
+def _overrides(look: dict) -> dict:
+    """look -> Blender overrides {component: (its .ydd.xml under import_xml/, texture letter or None)}."""
+    out = {}
+    for component, spec in look.items():
+        rel, _, letters = spec.partition(":")
+        out[component] = (industrialize_pipeline.IMPORT_XML_DIR / f"{rel}.xml", letters[:1] or None)
+    return out
+
+
 def _publish(staged: Path, dest: Path) -> None:
     """Move `staged` to `dest`, replacing it; the old one is removed only
     after the new one is in place."""
@@ -350,7 +427,7 @@ def _remove(path: Path) -> None:
 
 
 def _build_layered(ped_name: str, targets, out_dir: Path, stem: str,
-                   deformation_out: Path | None = None) -> dict:
+                   deformation_out: Path | None = None, look: dict | None = None) -> dict:
     """build_layered_ped's chain, writing <out_dir>/<stem>.blend (+ preview)."""
     try:
         conversion = industrialize_pipeline.industrialize()
@@ -369,6 +446,7 @@ def _build_layered(ped_name: str, targets, out_dir: Path, stem: str,
         glute_height=targets.glute_height if targets else None,
         preview_png=out_dir / f"{stem}_preview.png",
         deformation_out=deformation_out,
+        overrides=_overrides(look or {}),
         timeout_s=blender_cfg.get("layered_timeout_seconds", 900),
     )
     return {

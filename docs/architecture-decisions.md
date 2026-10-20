@@ -1551,3 +1551,29 @@ Voir le détail dans `docs/analyse-prerequis.md` §2. Résumé des points corrig
       Vérifié sur le vrai fichier (Eva) : les 10 entrées existantes sont inchangées, seule la
       déclaration XML passe de guillemets doubles à simples ; l'entrée d'Eva est identique champ
       par champ à celle de Camille écrite par PedSelector, au nom près.
+
+45. **Élargissement du tour de dos sans gonfler les seins (2026-10-20)** : en 95C, Eva avait des
+    seins « vides » en haut (rendu d'illustration). Cause : `widen_torso` multipliait tout le rayon,
+    seins compris, à pleine force au pli et en fondu vers le haut ; le bas du sein avançait
+    d'environ 4 cm de plus que le haut (sein tombant), puis le bonnet ne faisait que réduire cette
+    forme (échelle 0,969). Correction : seule la cage thoracique (profil de paroi au pli, `ribcage`)
+    est mise à l'échelle, l'excédent est translaté : r → r + k·smin(r, W) (min lissé sur 1 cm,
+    dérivée dans [1, 1+k], sans repli). Le bonnet est alors ajusté sur la forme d'origine (échelle
+    1,062). Anciennes déformations (sans `ribcage`) rejouées à l'identique.
+    - Vérifié sur Eva 95C : 95,5 / 112,2 cm ; rendus profil/face/3-4 : haut du sein plein comme sur
+      l'original, plus de sein tombant, sans pli. 11 coutures fermées.
+    - Limite : variante `uppr_002` (autre corps, 80A d'origine) à 98,0 / 111,6 cm (bande manquée ;
+      déjà manquée sur Camille avec l'ancien code). Glutes rejouées sur `uppr_001/004` : dos 0,796
+      (cible 0,78), limite connue des variantes.
+
+46. **Apparence des peds livrés (2026-10-20)** : tête, coiffure et pieds empruntés à un ped
+    de même squelette (`.yft` identique). Tête : `head_swap` (`.ymt` inchangé, une texture
+    par teint). Autres composants : `component_swap` ne garde que les drawables choisis,
+    renomme les fichiers et réécrit l'entrée `.ymt` (aTexData, compInfos, numAvailTex),
+    reconverti par CodeWalker. Coiffure livrée avec toutes ses couleurs (choix utilisateur :
+    tirage par le jeu ; l'aperçu montre la première). Pieds nus par défaut : le drawable
+    `feet` texturé peau. L'apparence est enregistrée dans `<name>_deformation.json` (`look`)
+    et conservée par `update_packaged_ped`. Un élément emprunté touché par le remodelage
+    (cheveux longs sur les épaules) est rejoué depuis son propre binaire et livré en 000.
+    Blender est lancé sans `DISPLAY`/`WAYLAND_DISPLAY` : sous WSLg il se bloquait au
+    démarrage une fois sur deux. Non encore validé en jeu (`.ymt` réécrit).

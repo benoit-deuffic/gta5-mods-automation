@@ -602,22 +602,44 @@ def mound_contract(points, weights, center, wall, upper_wall, lobe, apex_z, scal
     return out
 
 
-def widen_torso(points, weights, center, lobe, factor, seams=()):
-    """Pure logic (no bpy): scale the torso horizontally around `center` by
+def widen_torso(points, weights, center, lobe, factor, seams=(), ribcage=None):
+    """Pure logic (no bpy): widen the torso horizontally around `center` by
     `factor` (> 1 wider), times the lobe's vertical profile and the skin
     weight -- the ribcage change behind a different bra BAND. Arms (0 torso
     weight) don't move; `seams` (Lobes on the flanks, see fit_bust) cancel
-    the scaling where the arm joins, by their weight."""
+    the scaling where the arm joins, by their weight.
+
+    `ribcage` (wall_profile at the underbust fold) = what gets scaled: a
+    point's radius up to the ribcage is scaled, what sticks out of it (the
+    breasts) is carried along unscaled -- radius r -> r + k * smin(r, W).
+    Scaling the whole radius inflated the breasts with the ribcage, most at
+    the fold (full strength) and less toward the apex (fade): the lower pole
+    was pushed out ~4 cm more than the upper one on a 95C, a hanging breast
+    with an empty upper pole, which the cup fit then only scaled. smin is a
+    smooth min (RIBCAGE_SOFTNESS, no crease where the skin leaves the
+    ribcage); dr'/dr stays in [1, 1+k]: never folds. Without `ribcage`
+    (records written before it existed) the whole radius is scaled."""
     out = []
     for p, w in zip(points, weights):
         k = 0.0
         if w > 0:
-            theta = _polar(p, center)[0]
+            theta, r = _polar(p, center)
             seam = max((s.weight(p[2], theta) for s in seams), default=0.0)
             k = (factor - 1) * lobe.weight(p[2], theta) * (1 - seam) * min(w, 1.0)
-        out.append((center[0] + (p[0] - center[0]) * (1 + k), center[1] + (p[1] - center[1]) * (1 + k), p[2])
-                   if k else tuple(p))
+        if not k:
+            out.append(tuple(p))
+            continue
+        if ribcage is None:
+            g = 1 + k
+        else:
+            wall_r = _wall_radius(ribcage, theta)
+            smin = (r + wall_r - math.sqrt((r - wall_r) ** 2 + RIBCAGE_SOFTNESS ** 2)) / 2
+            g = 1 + k * smin / r if r else 1.0
+        out.append((center[0] + (p[0] - center[0]) * g, center[1] + (p[1] - center[1]) * g, p[2]))
     return out
+
+
+RIBCAGE_SOFTNESS = 0.01  # m: width of widen_torso's smooth min between skin radius and ribcage
 
 
 # Band (ribcage) fit: the underbust circumference is brought to the EU band
@@ -727,7 +749,7 @@ class Deformation:
     (region_weight). The fits bake it into the Blender meshes; the exporter
     (ped_package.py) replays the same one on every LOD of the shipped .ydd
     files, which Blender never imported. `widen` = (center, lobe, factor,
-    seams) (widen_torso, applied first), `shift` = (lobe, bottom_z, top_z, delta),
+    seams[, ribcage]) (widen_torso, applied first), `shift` = (lobe, bottom_z, top_z, delta),
     `contract` = (lobe, apex_z, scale, apex_spread),
     `upper_wall` = (z0, z1, radii) (see _wall_radius_at), or None."""
     prefixes: tuple[str, ...]
@@ -737,7 +759,7 @@ class Deformation:
     shift: tuple[Lobe, float, float, float] | None = None
     contract: tuple[Lobe, float, float, float] | None = None
     upper_wall: tuple[float, float, tuple[float, ...]] | None = None
-    widen: tuple[tuple[float, float], Lobe, float, tuple[Lobe, ...]] | None = None
+    widen: tuple | None = None  # (center, Lobe, factor, seams, ribcage radii or None)
 
     def apply(self, points, weights):
         if self.widen is not None:
@@ -762,7 +784,8 @@ class Deformation:
                    (lobe(shift[0]), *shift[1:]) if shift else None,
                    (lobe(contract[0]), *contract[1:]) if contract else None,
                    (upper[0], upper[1], tuple(upper[2])) if upper else None,
-                   (tuple(widen[0]), lobe(widen[1]), widen[2], tuple(lobe(x) for x in widen[3]))
+                   (tuple(widen[0]), lobe(widen[1]), widen[2], tuple(lobe(x) for x in widen[3]),
+                    tuple(widen[4]) if len(widen) > 4 and widen[4] else None)
                    if widen else None)
 
 
@@ -1250,7 +1273,7 @@ def fit_bust(armature, bra_size: str) -> dict:
     widen, band = None, None
     if bra_band_mismatch(bra_size, base["underbust_cm"]):
         band_cm = parse_bra_size(bra_size)[0]
-        band_center, _radii = _wall(torso, edges, base["fold_z"])
+        band_center, ribcage = _wall(torso, edges, base["fold_z"])
         armpit_z = _armpit_z(_body_meshes(armature))
         if armpit_z is None or armpit_z <= base["fold_z"]:
             return {"error": f"no armpit found above the underbust of {body.name}: can't bound the band fit"}
@@ -1262,12 +1285,12 @@ def fit_bust(armature, bra_size: str) -> dict:
                            armpit_z + 10.0, armpit_z + 11.0) for sign in (1, -1))
 
         def widened(f):
-            return widen_torso(torso, weights, band_center, band_lobe, f, seams)
+            return widen_torso(torso, weights, band_center, band_lobe, f, seams, ribcage)
 
         factor, _v, band_reached = fit_monotonic(
             lambda f: 100 * slice_circumference(widened(f), edges, base["fold_z"]),
             band_cm, *BAND_FIT_RANGE, BAND_FIT_TOLERANCE_CM)
-        widen = (band_center, band_lobe, factor, seams)
+        widen = (band_center, band_lobe, factor, seams, tuple(ribcage))
         band = {"target_cm": band_cm, "factor": round(factor, 3), "reached": band_reached}
         torso = widened(factor)  # the cup is fitted on the new ribcage
         base = _measure_bust(torso, edges, regions)

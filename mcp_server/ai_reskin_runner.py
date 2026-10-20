@@ -15,6 +15,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mcp_server import blender_runner
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 RESKIN_SCRIPT = SCRIPTS_DIR / "ai_texture_reskin.py"
 
@@ -78,7 +80,8 @@ def generate_reskin(template_path: Path, output_dir: Path, model_name: str, prom
     if skin_prompt:
         cmd += ["--skin-prompt", skin_prompt]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s,
+                              env=blender_runner.headless_env())
     except subprocess.TimeoutExpired as exc:
         return ReskinResult(status="error", output_dir=output_dir, log=str(exc))
 

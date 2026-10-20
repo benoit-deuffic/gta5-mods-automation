@@ -316,7 +316,7 @@ def scale_to_reference_bbox(target_mesh, reference_mesh):
     bpy.context.view_layer.update()
 
 
-def relink_external_textures(search_root: str) -> dict:
+def relink_external_textures(search_root: str, keep_resolved: bool = False) -> dict:
     """Fixes a real bug found 2026-10-12 while rendering a layered MP
     Freemode ped import: Sollumz's CodeWalker-XML import creates each Image
     datablock with a RELATIVE path ("//name.dds", source='FILE') resolved
@@ -338,6 +338,11 @@ def relink_external_textures(search_root: str) -> dict:
     (lowercase, no extension), then for every FILE-backed Image datablock
     whose name matches an indexed .dds, overwrites its filepath with the
     real absolute path and reloads it.
+
+    `keep_resolved`: leave images that already point at an existing file --
+    for a root holding ANOTHER ped's textures (a donor head), whose names
+    collide with this ped's (Beachgirl5's accs textures re-pointed
+    CatalinaNude's necklace).
 
     Returns {"relinked": [...names...], "not_found": [...names...]}.
     """
@@ -368,6 +373,8 @@ def relink_external_textures(search_root: str) -> dict:
                 relinked.append(img.name)
             continue
         if img.source != 'FILE':
+            continue
+        if keep_resolved and os.path.isfile(bpy.path.abspath(img.filepath)):
             continue
         real_path = dds_index.get(img.name.lower())
         if real_path is None:

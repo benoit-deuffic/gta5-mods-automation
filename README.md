@@ -75,9 +75,15 @@ mcp_servers:
    (`scripts/ped_package.py`) et `dist/<new_name>.oiv` pour PedSelector
    (`scripts/oiv_package.py`), puis inscription dans `UserMods/ap_m.xml` (sauvegarde
    avant écriture, entrée existante jamais modifiée). Reste manuel : installation OpenIV.
-8. `update_packaged_ped(name, body_description)` — change le corps d'un ped déjà
-   livré (ex. `"Eva", "bonnet 95C"`) : seules les cibles nommées changent,
-   reconstruit depuis le ped source, remplace `dist/<name>*` seulement en cas de succès.
+8. `update_packaged_ped(name, body_description, head, hair)` — change le corps ou
+   l'apparence d'un ped déjà livré (ex. `"Eva", "bonnet 95C"`) : seul ce qui est nommé
+   change, reconstruit depuis le ped source, remplace `dist/<name>*` seulement en cas de succès.
+
+Apparence (`head`, `hair` de 7 et 8, drawables de `import/` au même squelette) : tête
+d'un autre ped (`scripts/head_swap.py`, teint par race vérifié), coiffure livrée avec
+toutes ses couleurs (le jeu en tire une à chaque apparition ; par défaut tirée dans
+`hair_pool` de `config/pipeline.json`), pieds nus par défaut (`scripts/component_swap.py`
+réécrit l'entrée `.ymt`). Les éléments empruntés suivent le corps remodelé.
 
 ## Génération 3D : Tripo3D (cloud, défaut) ou local (futur poste GPU)
 

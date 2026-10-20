@@ -277,3 +277,28 @@ def test_package_refuses_a_variant_that_is_not_the_peds_own_skin(tmp_path):
     (tmp_path / "x.deform.json").write_text(json.dumps(spec))
     with pytest.raises(PackageError, match="not one of Ped's own skin drawables"):
         package_ped(tmp_path / "x.deform.json", _source(tmp_path), "New", tmp_path / "out")
+
+
+def test_a_moved_look_drawable_ships_reshaped_as_drawable_000(tmp_path, monkeypatch):
+    # Beachgirl5's long hair lies on the reshaped shoulders: it must follow,
+    # shipped as the ped's hair_000 (the drawable the look puts there)
+    donor_xml = tmp_path / "xml" / "Donor"
+    donor_xml.mkdir(parents=True)
+    (donor_xml / "uppr_003_u.ydd.xml").write_text(_YDD.format(declared=4, bone_ids="0, 1, 2, 3", breast=2, hand=3))
+    src = _source(tmp_path)
+    (src / "Donor").mkdir()
+    (src / "Donor" / "uppr_003_u.ydd").write_bytes(b"donor original")
+    _fake_codewalker(monkeypatch, donor_xml)
+
+    def fake_look(look, source, originals, stage_dir, stage_ymt, work):
+        (stage_dir / "uppr_000_u.ydd").write_bytes(b"donor original")  # what component_swap puts in
+        return {"uppr": "Donor/uppr_003_u.ydd"}
+
+    monkeypatch.setattr(ped_package, "_apply_look", fake_look)
+    spec = _spec(tmp_path, {"uppr": str(donor_xml / "uppr_003_u.ydd.xml")})
+    report = package_ped(spec, src, "New", tmp_path / "out", {"uppr": "Donor/uppr_003_u.ydd"})
+
+    assert report["reshaped"] == {"uppr_000_u.ydd": 1}
+    shipped = _vertices(ET.parse(tmp_path / "out" / "New" / "uppr_000_u.ydd").getroot())[0][:3]
+    assert [float(c) for c in shipped] == pytest.approx([0.3, 0.0, 0.0])  # replayed, not the donor original
+    assert not (tmp_path / "out" / "New" / "uppr_003_u.ydd").exists()

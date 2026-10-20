@@ -138,6 +138,9 @@ def tool_env(tmp_path, monkeypatch):
 
     def fake_build(**kw):
         built.update(kw)
+        if kw.get("deformation_out"):  # the real runner only reports "built" once it exists
+            kw["deformation_out"].write_text(json.dumps({"ped_name": kw["ped_name"], "targets": {
+                "bra_size": kw["bust_size"], "glutes": kw["glutes"], "glute_height": kw["glute_height"]}}))
         return blender_runner.LayeredBuildResult(status="built", output_blend=kw["output_blend"])
 
     monkeypatch.setattr(server.blender_runner, "build_layered_ped", fake_build)
@@ -176,8 +179,9 @@ def ship_env(tool_env, tmp_path, monkeypatch):
     monkeypatch.setitem(server._CONFIG, "usermods_ap_m_xml", str(usermods / "ap_m.xml"))  # never the real one
     calls = {}
 
-    def fake_package(deformation, source, name, out):
+    def fake_package(deformation, source, name, out, look=None):
         calls["package"] = (deformation, source, name, out)
+        calls["look"] = look
         (out / name).mkdir()
         (out / name / "uppr_000_r.ydd").write_text(f"body {calls.get('tag')}")
         for ext in ("yft", "ymt"):
@@ -270,3 +274,49 @@ def test_update_needs_a_recorded_build(ship_env):
     res = server.update_packaged_ped("Nobody", "bonnet 95C")
     assert res["status"] == "error" and "no recorded build" in res["error"]
     assert ship_env.built == {}
+
+
+def test_look_is_validated_before_blender_then_built_packaged_recorded_and_kept(ship_env, tmp_path, monkeypatch):
+    imp, imp_xml = tmp_path / "import", tmp_path / "import_xml"
+    for rel in ("Donor/head_002_r.ydd", "Donor/hair_004_u.ydd", "Donor/hair_001_u.ydd", "CatalinaNude/feet_002_r.ydd"):
+        (imp / rel).parent.mkdir(parents=True, exist_ok=True)
+        (imp / rel).write_bytes(b"ydd")
+    (imp_xml / "CatalinaNude").mkdir(parents=True)
+    (imp_xml / "CatalinaNude" / "feet_diff_002_f_whi.ytd.xml").write_text(
+        "<TextureDictionary><Item><FileName>mp_fm_skin_f_fe_whi.dds</FileName></Item></TextureDictionary>")
+    monkeypatch.setattr(server.industrialize_pipeline, "IMPORT_DIR", imp)
+    monkeypatch.setattr(server.industrialize_pipeline, "IMPORT_XML_DIR", imp_xml)
+    monkeypatch.setitem(server._CONFIG, "hair_pool", ["Donor/hair_004_u.ydd"])
+    monkeypatch.setattr(server.prompt_refiner, "infer_body_targets",
+                        lambda d: prompt_refiner.BodyTargets("85C", None, None, None))
+
+    bad = server.package_layered_ped("CatalinaNude", "Eva", "bonnet 85C", head="../etc/passwd")
+    assert bad["status"] == "error" and ship_env.built == {}  # refused before Blender
+
+    res = server.package_layered_ped("CatalinaNude", "Eva", "bonnet 85C", head="Donor/head_002_r.ydd")
+    look = {"head": "Donor/head_002_r.ydd", "hair": "Donor/hair_004_u.ydd",  # random style, all colours
+            "feet": "CatalinaNude/feet_002_r.ydd"}                              # barefoot by default
+    assert res["status"] == "packaged" and res["look"] == look and ship_env.calls["look"] == look
+    assert ship_env.built["overrides"]["hair"] == (imp_xml / "Donor" / "hair_004_u.ydd.xml", None)
+    record = json.loads((tmp_path / "Eva" / "Eva_deformation.json").read_text())
+    assert record["look"] == look  # kept by updates
+
+    ship_env.calls.clear()
+    res = server.update_packaged_ped("Eva", hair="Donor/hair_001_u.ydd:b")
+    assert ship_env.calls["look"] == {**look, "hair": "Donor/hair_001_u.ydd:b"}  # only the hair changed
+    assert server.update_packaged_ped("Nobody", hair="Donor/hair_001_u.ydd:b")["status"] == "error"
+
+
+def test_a_record_from_before_looks_keeps_its_head(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.industrialize_pipeline, "IMPORT_XML_DIR", tmp_path)
+    old = {"targets": {"bra_size": "95C", "head": str(tmp_path / "Donor" / "head_000_r.ydd.xml")}}
+    assert server._recorded_look(old) == {"head": "Donor/head_000_r.ydd"}
+    assert server._recorded_look({"targets": {}}) == {}
+
+
+def test_blender_runs_without_the_wslg_display(monkeypatch):
+    # WSLg's display hangs Blender at startup on about half the runs
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    env = blender_runner.headless_env()
+    assert "DISPLAY" not in env and "WAYLAND_DISPLAY" not in env and env["PATH"]

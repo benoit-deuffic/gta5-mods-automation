@@ -4,12 +4,13 @@ sizes, glute shapes, bisection, excess-over-a-wall deformation).
 fit_bust()/fit_glutes() themselves (bpy) were verified for real on
 CatalinaNude -- see docs/architecture-decisions.md.
 """
+import json
 import math
 
 import pytest
 
 from scripts.body_morphology import (
-    GLUTE_HEIGHTS, GLUTE_SHAPES, Lobe, bra_band_mismatch, bra_size_label, bust_target_cm,
+    Deformation, GLUTE_HEIGHTS, GLUTE_SHAPES, Lobe, bra_band_mismatch, bra_size_label, bust_target_cm,
     cleft_top_height, excess_scale, fit_monotonic, follow_skin, mound_contract, widen_torso, fold_height, glute_height_label, glute_shape_label,
     hull_perimeter, parse_bra_size, section_xy, slice_circumference, slice_depth, slice_extent,
     shift_bump, vertical_shift, wall_profile, glute_targets_missed, _glute_lobes,
@@ -348,3 +349,31 @@ def test_widen_torso_fades_in_below_the_fold():
     out = widen_torso([low, waist], [1.0, 1.0], (0.0, 0.0), everywhere, 1.1)
     assert 0.18 < math.hypot(*out[0][:2]) < 0.18 * 1.1
     assert out[1] == waist
+
+
+def test_widen_torso_carries_the_breast_instead_of_inflating_it():
+    # a 95C on CatalinaNude: the 95 band inflated the lower breast with the
+    # ribcage (full strength at the fold, fading up) -> hanging breast with an
+    # empty upper pole. With the ribcage given, only the ribcage is scaled.
+    everywhere = Lobe(0.0, (180.0, 181.0), 0.14, 0.26, 0.26, 0.46)
+    ribcage = [0.13] * 72
+    on_rib, nipple = _at(0, z=0.26, r=0.13), _at(0, z=0.26, r=0.23)
+    out = widen_torso([on_rib, nipple], [1.0, 1.0], (0.0, 0.0), everywhere, 1.2, (), ribcage)
+    rib_r, nip_r = (math.hypot(*p[:2]) for p in out)
+    assert rib_r == pytest.approx(0.13 * 1.2, abs=0.003)            # ribcage widened
+    assert nip_r - rib_r == pytest.approx(0.23 - 0.13, abs=0.003)   # breast projection kept
+    # never folds: radial order kept along a ray through the breast
+    radii = [math.hypot(*p[:2]) for p in widen_torso(
+        [_at(0, z=0.26, r=0.10 + i * 0.002) for i in range(80)], [1.0] * 80, (0.0, 0.0), everywhere, 1.2, (),
+        ribcage)]
+    assert all(b > a for a, b in zip(radii, radii[1:]))
+
+
+def test_deformation_with_ribcage_round_trips_and_old_records_still_load():
+    lobe = Lobe(0.0, (180.0, 181.0), 0.14, 0.26, 0.26, 0.46)
+    d = Deformation(("SKEL_Spine",), (0.0, 0.0), (0.13,) * 4, ((lobe, 1.0),),
+                    widen=((0.0, 0.0), lobe, 1.1, (), (0.13,) * 72))
+    assert Deformation.from_dict(json.loads(json.dumps(d.to_dict()))) == d
+    old = d.to_dict()
+    old["widen"] = old["widen"][:4]  # written before the ribcage existed: whole-radius scaling
+    assert Deformation.from_dict(old).widen[4] is None

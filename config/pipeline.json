@@ -26,7 +26,10 @@
     "max_vertices_per_geometry": 65535
   },
   "delivery": {
-    "targets": ["addonpeds_pedselector", "dlcpack"],
+    "targets": [
+      "addonpeds_pedselector",
+      "dlcpack"
+    ],
     "usermods_manifest_name": "ap_m.xml",
     "addonpeds_dlc_name": "pedselector",
     "default_relationship_group_female": "CIVFEMALE",
@@ -40,5 +43,11 @@
     "min_texture_bytes": 5000,
     "require_power_of_two_textures": true
   },
-  "usermods_ap_m_xml": "/mnt/c/Users/benoit/Documents/Rockstar Games/GTA V/UserMods/ap_m.xml"
+  "usermods_ap_m_xml": "/mnt/c/Users/benoit/Documents/Rockstar Games/GTA V/UserMods/ap_m.xml",
+  "hair_pool": [
+    "Beachgirl5/hair_000_u.ydd:dabc",
+    "Beachgirl5/hair_002_u.ydd:abce",
+    "Beachgirl5/hair_003_u.ydd:acd"
+  ],
+  "hair_pool_note": "Hair styles (with their kept colours, first = the one previews show) drawn at random when no hair is asked; the game draws one of the colours at each spawn. 000: golden blond/brown/black/red; 002: platinum/dark blond/auburn/dark brown; 003: silver/red/black. Left out: pink/magenta/olive colours, Beachgirl5 hair 004-006 (render broken), CatalinaNude's own (001 is a skin cap)."
 }

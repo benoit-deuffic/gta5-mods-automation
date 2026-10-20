@@ -50,6 +50,8 @@ from body_morphology import (  # noqa: E402
     shared_vertices,
 )
 from codewalker_convert import convert_xml_to_binary, export_binary_to_xml  # noqa: E402
+from component_swap import ComponentSwapError, Pick, same_skeleton, set_component  # noqa: E402
+from head_swap import HeadSwapError, swap_head  # noqa: E402
 from layered_ped_builder import (  # noqa: E402
     LAYOUT_SIZES, bone_group_remap, component_variants, high_lod_positions, skeleton_bone_names,
 )
@@ -265,6 +267,56 @@ def _export(original: Path, work: Path) -> Path:
     return xml_path
 
 
+def _apply_look(look: dict, source: Path, originals: dict, stage_dir: Path, stage_ymt: Path, work: Path) -> dict:
+    """See package_ped. Returns {component: what was put in}."""
+    report = {}
+    ymt_trees = {}
+
+    def ymt_of(folder: Path) -> ET.ElementTree:
+        if folder not in ymt_trees:
+            binary = folder.parent / f"{folder.name}.ymt"
+            out = work / "ymt" / folder.name
+            result = export_binary_to_xml(binary, out)
+            xml = out / f"{binary.name}.xml"
+            if result.status != "converted" or not xml.is_file():
+                raise PackageError(f"codewalker-cli export of {binary} failed: {result.status} {result.message}")
+            ymt_trees[folder] = ET.parse(xml)
+        return ymt_trees[folder]
+
+    edited = False
+    for component, spec in sorted(look.items()):
+        rel, _, letters = spec.partition(":")
+        drawable = (source / rel).resolve()
+        if source.resolve() not in drawable.parents or not drawable.is_file():
+            raise PackageError(f"look {component}: no drawable {rel} under {source}")
+        if not same_skeleton(originals["yft"], drawable.parent):
+            raise PackageError(f"look {component}: {drawable.parent.name} doesn't use the ped's skeleton (.yft differs)")
+        try:
+            if component == "head":
+                if letters:
+                    raise PackageError("look head: texture letters can't be picked (one per skin race)")
+                picked = swap_head(originals["dir"], stage_dir, drawable)
+                report[component] = f"head 000 from {rel}, textures per race {picked['races']}"
+                continue
+            index = int(drawable.name.split("_")[1])
+            picks = [Pick(drawable.parent, ymt_of(drawable.parent).getroot(), index, letters or None)]
+            report[component] = set_component(stage_dir, ymt_of(originals["dir"]).getroot(), component, picks)
+            edited = True
+        except (HeadSwapError, ComponentSwapError, ValueError) as exc:
+            raise PackageError(f"look {component}: {exc}") from exc
+    if edited:
+        src = work / "ymt" / "edited"
+        src.mkdir(parents=True)
+        stem = stage_ymt.name[:-len(".ymt")]
+        ymt_of(originals["dir"]).write(src / f"{stem}.ymt.xml", encoding="UTF-8", xml_declaration=True)
+        result = convert_xml_to_binary(src, work / "ymt" / "bin", stem, extensions=(".ymt",))
+        binary = work / "ymt" / "bin" / f"{stem}.ymt"
+        if result.status != "converted" or not binary.is_file():
+            raise PackageError(f"codewalker-cli conversion of the edited .ymt failed: {result.status} {result.message}")
+        shutil.copy2(binary, stage_ymt)
+    return report
+
+
 def _convert(xml_path: Path, tree: ET.ElementTree) -> Path:
     tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
     src = xml_path.parent
@@ -312,7 +364,11 @@ def check_output(name: str, out: Path) -> None:
         raise PackageError(f"output already exists, not overwriting: {existing}")
 
 
-def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> dict:
+def package_ped(deformation_json: Path, source: Path, name: str, out: Path, look: dict | None = None) -> dict:
+    """`look` = {component: "<ped>/<comp>_NNN_<u|r>.ydd[:letters]"} (paths
+    under `source`): "head" replaces head 000 keeping the .ymt
+    (head_swap.swap_head); any other component gets exactly these drawables
+    (component_swap.set_component: files renamed, .ymt entry rewritten)."""
     check_output(name, out)
     spec = json.loads(deformation_json.read_text())
     ped = spec["ped_name"]
@@ -339,10 +395,19 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
             return original
 
         # component -> (tree, exported .ydd.xml or None if not one of <ped>'s own files)
+        # A look drawable (another ped's head/hair, the barefoot feet) is shipped
+        # as drawable 000 of its component: worn on the reshaped body, it is
+        # replayed like the ped's own files (long hair follows the shoulders and
+        # back), exported from its own binary.
+        look_binaries = {c: source / spec_.partition(":")[0] for c, spec_ in (look or {}).items()}
         loaded = {}
         for component, xml in sorted(spec["components"].items()):
             xml = Path(xml)
             if not xml.name.endswith(".ydd.xml") or not deformations:
+                continue
+            if component in look_binaries:
+                exported = _export(look_binaries[component], work)
+                loaded[component] = (ET.parse(exported), exported)
                 continue
             if os.path.abspath(xml.parent) != os.path.abspath(top_tier):
                 # A lower tier or a body donor has no slot in the shipped
@@ -362,6 +427,7 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
                 file_name = exported.name[:-len(".xml")]
                 skin_points[file_name] += (high_lod_positions(tree.getroot()),)
         reshaped, unchanged = {}, sorted(c for c, n in moved.items() if not n)
+        look_reshaped = {}  # component -> (moved vertices, binary): replaces its drawable 000 after the look
         for component, count in sorted(moved.items()):
             if not count:
                 continue
@@ -369,7 +435,10 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
             if exported is None:
                 raise PackageError(f"{component} ({spec['components'][component]}) is reshaped but "
                                    f"isn't one of {ped}'s own files")
-            reshaped[exported.name[:-len(".xml")]] = (count, _convert(exported, tree))
+            if component in look_binaries:
+                look_reshaped[component] = (count, _convert(exported, tree))
+            else:
+                reshaped[exported.name[:-len(".xml")]] = (count, _convert(exported, tree))
 
         # The other body variants (import_layered_ped fit_body_variants):
         # skin only, their own fitted deformations; nothing follows them
@@ -395,13 +464,18 @@ def package_ped(deformation_json: Path, source: Path, name: str, out: Path) -> d
         shutil.copy2(originals["ymt"], stage / f"{name}.ymt")
         for file_name, (_count, binary) in reshaped.items():
             shutil.copy2(binary, stage / name / file_name)
+        look_report = _apply_look(look or {}, source, originals, stage / name, stage / f"{name}.ymt", work)
+        for component, (count, binary) in look_reshaped.items():
+            target = sorted((stage / name).glob(f"{component}_000_*.ydd"))[0]
+            shutil.copy2(binary, target)
+            reshaped[target.name] = (count, binary)
         for target in targets:
             os.replace(stage / target.name, target)
     # every drawable the .ymt can pick for a skin slot, reshaped or not
     skin_files = sorted(p.name for c in SKIN_COMPONENTS if c in spec["components"] and deformations
                         for p in component_variants(originals["dir"] / Path(spec["components"][c]).name[:-len(".xml")]))
     return {"output": [str(t) for t in targets], "reshaped": {f: m for f, (m, _b) in reshaped.items()},
-            "unchanged_components": unchanged,
+            "unchanged_components": unchanged, "look": look_report,
             "unreshaped_skin_variants": [f for f in skin_files if f not in reshaped],
             "variants": [{"file": Path(v["xml"]).name[:-len(".xml")],
                           **{k: v.get(k) for k in ("bust", "glutes", "reached")}} for v in variants],
@@ -413,6 +487,8 @@ def report_lines(report: dict) -> list[str]:
     lines = [f"[OK] reshaped {file_name}: {moved} vertices (all LODs)"
              for file_name, moved in report["reshaped"].items()]
     lines.append(f"[INFO] unchanged components (original binaries): {report['unchanged_components']}")
+    for component, picked in (report.get("look") or {}).items():
+        lines.append(f"[OK] {component}: {picked}")
     for v in report["variants"]:
         bust, glutes = v.get("bust"), v.get("glutes")
         line = (f"bust {bust['underbust_cm']}/{bust['bust_cm']} cm (~{bust['size']}, target {bust['target_bust_cm']})"
@@ -442,9 +518,13 @@ def main(argv=None) -> int:
                         help="Directory with the original <ped>.yft, <ped>.ymt and <ped>/ binaries")
     parser.add_argument("--name", required=True, help="New ped name (files are renamed to it)")
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--look", action="append", default=[], metavar="COMP=PED/DRAWABLE.ydd[:LETTERS]",
+                        help="e.g. head=Beachgirl5/head_002_r.ydd, hair=Beachgirl5/hair_004_u.ydd:e, "
+                             "feet=CatalinaNude/feet_002_r.ydd (paths under --source)")
     args = parser.parse_args(argv)
     try:
-        report = package_ped(args.deformation, args.source, args.name, args.out)
+        report = package_ped(args.deformation, args.source, args.name, args.out,
+                             dict(spec.split("=", 1) for spec in args.look))
     except PackageError as exc:
         print(f"[FAIL] {exc}")
         return 1

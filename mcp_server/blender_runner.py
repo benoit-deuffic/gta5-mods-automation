@@ -37,6 +37,17 @@ def _resolve_blender_path() -> str | None:
     return shutil.which("blender")
 
 
+def headless_env() -> dict:
+    """Environment for a `blender --background` subprocess: no DISPLAY /
+    WAYLAND_DISPLAY. On WSL2 they point at WSLg, and Blender connects to it
+    even in background mode; that connection hangs for good at startup on
+    about half the runs (main thread in poll() on the display socket, no
+    output after "Unable to find libdecor"). Without them Blender starts
+    every time; Cycles (the pipeline's only render engine, CUDA) needs no
+    display -- EEVEE would fail to get an EGL context instead."""
+    return {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+
+
 def is_blender_available() -> bool:
     return _resolve_blender_path() is not None
 
@@ -69,7 +80,7 @@ def compile_ped(template_path: Path, source_fbx: Path, output_dir: Path, model_n
         "--model-name", model_name,
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=headless_env())
     except subprocess.TimeoutExpired as exc:
         return CompileResult(status="error", output_dir=output_dir, log=str(exc))
 
@@ -112,6 +123,7 @@ def build_layered_ped(template_path: Path, ped_root: Path, ped_name: str, output
                       preview_png: Path | None = None,
                       skeleton_yft: Path | None = None,
                       deformation_out: Path | None = None,
+                      overrides: dict | None = None,
                       timeout_s: int = 900) -> LayeredBuildResult:
     """Run scripts/import_layered_ped.py headless: layered component
     resolution + Sollumz import (native skinning via <ped_root>/<ped>.yft.xml,
@@ -147,13 +159,15 @@ def build_layered_ped(template_path: Path, ped_root: Path, ped_name: str, output
         cmd += ["--skeleton-yft", str(skeleton_yft)]
     if preview_png:
         cmd += ["--preview-png", str(preview_png)]
+    for component, (xml, letter) in sorted((overrides or {}).items()):  # import_layered_ped --override
+        cmd += ["--override", f"{component}={xml}" + (f":{letter}" if letter else "")]
     if deformation_out:
         cmd += ["--deformation-out", str(deformation_out)]
         deformation_out.unlink(missing_ok=True)
     output_blend.parent.mkdir(parents=True, exist_ok=True)
     output_blend.unlink(missing_ok=True)  # a previous run's file must not pass for this one's
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=headless_env())
     except subprocess.TimeoutExpired as exc:
         return LayeredBuildResult(status="error", output_blend=output_blend, log=str(exc))
 

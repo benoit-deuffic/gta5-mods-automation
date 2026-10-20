@@ -111,11 +111,25 @@ def parse_args():
     parser.add_argument("--deformation-out", default=None,
                         help="Write the applied --bust-size/--glutes reshapes as JSON (with the "
                              "component files they were fitted on) for scripts/ped_package.py")
+    parser.add_argument("--override", action="append", default=[], metavar="COMP=YDD_XML[:LETTER]",
+                        help="Show this drawable (.ydd.xml, any ped with the same skeleton) as COMP instead of "
+                             "the ped's own, with its texture LETTER (default: the ethnicity one) -- the "
+                             "shipped files get it from ped_package --look (head_swap / component_swap)")
     parser.add_argument("--skeleton-yft", default=None,
                          help="CodeWalker-XML .yft whose skeleton is used for a ped that ships "
                               "without its own <ped-name>.yft.xml (e.g. an MP Freemode component "
                               "pack): must match the --template skeleton")
     return parser.parse_args(raw_args)
+
+
+def parse_overrides(specs) -> dict:
+    """["hair=/x/hair_004_u.ydd.xml:e", ...] -> {"hair": ("/x/hair_004_u.ydd.xml", "e")}."""
+    out = {}
+    for spec in specs:
+        comp, _, rest = spec.partition("=")
+        xml, _, letter = rest.partition(".ydd.xml")
+        out[comp] = (xml + ".ydd.xml", letter.lstrip(":") or None)
+    return out
 
 
 def _external_skeleton_import_kwargs(skeleton_yft: Path) -> dict:
@@ -146,7 +160,8 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
                        generic_skin_root: str | None = None,
                        ethnicity: str = "whi",
                        fallback_skeleton_yft: str | None = None,
-                       component_files: dict | None = None) -> dict:
+                       component_files: dict | None = None,
+                       overrides: dict | None = None) -> dict:
     """The bpy-dependent orchestration: resolve layers, import, rig, relink
     textures. Returns a stats dict for the caller to report/log. Split out
     from main() so a test can call it with a fake bpy and assert on the
@@ -172,6 +187,10 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
         resolved = resolve_layered_components(Path(ped_root), ped_name,
                                                extensions=(".ydd.xml",))
     resolved.update({comp: Path(p) for comp, p in (component_files or {}).items()})
+    # {component: (drawable .ydd.xml, texture letter or None)}: the look picked
+    # for the shipped ped (another ped's head/hair, the barefoot feet...)
+    overrides = overrides or {}
+    resolved.update({comp: Path(xml) for comp, (xml, _letter) in overrides.items()})
     stats: dict = {"resolved_components": {comp: str(p) for comp, p in resolved.items()}}
 
     bpy.ops.wm.open_mainfile(filepath=template_path)
@@ -274,6 +293,11 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
         pass_result = bre.relink_external_textures(root)
         relink_result["relinked"] = list(set(relink_result["relinked"]) | set(pass_result["relinked"]))
         relink_result["not_found"] = [n for n in relink_result["not_found"] if n in pass_result["not_found"]]
+    for folder in sorted({str(Path(xml).parent) for xml, _letter in overrides.values()}):
+        # another ped's own textures, without touching this ped's same-named ones
+        pass_result = bre.relink_external_textures(folder, keep_resolved=True)
+        relink_result["relinked"] = list(set(relink_result["relinked"]) | set(pass_result["relinked"]))
+        relink_result["not_found"] = [n for n in relink_result["not_found"] if n in pass_result["not_found"]]
     stats["textures_relinked"] = len(relink_result["relinked"])
     stats["textures_not_found"] = relink_result["not_found"]
 
@@ -285,10 +309,13 @@ def build_layered_ped(template_path: str, ped_root: str, ped_name: str,
     # overrides those can't be verified offline.
     component_diffuse = {}
     for component, meshes in new_meshes_by_component.items():
-        dds = resolve_component_diffuse(resolved[component], ethnicity)
+        letter = overrides.get(component, (None, None))[1]
+        dds = resolve_component_diffuse(resolved[component], ethnicity, letter)
         if dds is None or not meshes:
             continue
-        replaced = bre.apply_diffuse_texture(meshes, str(dds), only_missing=True)
+        # An overridden drawable shows what the game will draw (embedded names
+        # are stale: Beachgirl5's head_000 points at one of ITS race textures).
+        replaced = bre.apply_diffuse_texture(meshes, str(dds), only_missing=component not in overrides)
         if replaced:
             component_diffuse[component] = dds.name
             stats["textures_not_found"] = [n for n in stats["textures_not_found"] if n not in replaced]
@@ -539,7 +566,8 @@ def main():
         if args.extra_texture_roots else ()
     build_kwargs = dict(body_donor_root=args.body_donor_root, body_donor_components=donor_components,
                         extra_texture_roots=extra_roots, generic_skin_root=args.generic_skin_root,
-                        ethnicity=args.ethnicity, fallback_skeleton_yft=args.skeleton_yft)
+                        ethnicity=args.ethnicity, fallback_skeleton_yft=args.skeleton_yft,
+                        overrides=parse_overrides(args.override))
     stats = build_layered_ped(args.template, args.ped_root, args.ped_name, **build_kwargs)
 
     print("[INFO] Resolved components:")
